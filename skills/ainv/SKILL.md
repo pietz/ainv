@@ -1,18 +1,34 @@
 ---
 name: ainv
-description: Use ainv when credentials from macOS Keychain are needed in a dotenv file or child command, when searching existing credential metadata, or when helping a user add a new local credential without exposing its value.
+description: Store and use API keys, tokens, and passwords without exposing their values. Use when a task needs a credential, authenticated command, dotenv file, macOS Keychain item, 1Password secret, or help with a missing credential.
 ---
 
 # ainv
 
-Use `ainv` as the safe interface to macOS Keychain credentials. Treat
-`ainv --help` and `ainv <command> --help` as the syntax source of truth.
+Keep secret values outside the agent context. Prefer an existing native login when
+one works; use `ainv` for macOS Keychain discovery, creation, and delivery.
+Treat `ainv --help` and `ainv <command> --help` as the syntax source of truth.
 
-## Choose the least-exposing authentication path
+## Choose the least-exposing path
 
-Prefer a tool's native authenticated session when it already works, such as
-`gh`, SSH agent, cloud workload identity, or a provider CLI. Use `ainv` when a
-consumer specifically needs an environment variable or dotenv entry.
+1. Prefer native authenticated sessions such as `gh`, SSH agent, cloud workload
+   identity, `pg_service.conf`/`.pgpass`, or a provider CLI.
+2. Prefer `ainv run` when a child process needs a Keychain value in its
+   environment.
+3. Use `ainv set` only when the consumer requires a dotenv file.
+
+`ainv` currently supports non-synchronizable generic passwords in the default
+macOS Keychain. It does not yet deliver 1Password credentials. For a 1Password
+credential, prefer existing native authentication or a documented mechanism
+that resolves the value outside agent-visible output. Never use `op read` as a
+workaround; pause and involve the user if no safe delivery path is available.
+
+## Keychain convention
+
+When adding credentials, use the target environment-variable name as the
+Keychain service and an explicit scope such as `personal`, `workgenius`, or a
+client name as the account. Discovery returns an opaque persistent reference,
+which avoids ambiguous service-only retrieval.
 
 ## Find an existing credential
 
@@ -36,8 +52,20 @@ ainv add OPENAI_API_KEY --provider keychain --account personal
 
 `--label` is optional. The user must run or complete this command in an
 interactive terminal and enter the value through its hidden confirmation
-prompts. Never request a credential in chat, accept it as a command argument, or
-pipe it into `ainv`.
+prompts. Never request a credential in chat, accept it as a command argument,
+or pipe it into `ainv`. A Keychain authorization dialog can appear during
+first use; the user should approve it only when the operation is expected.
+
+## Inject into one command
+
+Prefer process injection when the consumer supports environment variables:
+
+```console
+ainv run 'OPENAI_API_KEY=keychain://v1/item/REFERENCE' -- command
+```
+
+Do not run environment-dumping or debug commands inside `ainv run`. The child
+process receives the plaintext value and can print or transmit it.
 
 ## Write one dotenv entry
 
@@ -51,23 +79,15 @@ grep, summarize, or otherwise inspect it afterward. `ainv` refuses unsafe Git
 destinations unless an explicit override is given; do not use an override
 without the user's informed approval.
 
-## Inject into one command
-
-Prefer process injection when the consumer supports environment variables:
-
-```console
-ainv run 'OPENAI_API_KEY=keychain://v1/item/REFERENCE' -- command
-```
-
-Do not run environment-dumping or debug commands inside `ainv run`. The child
-process receives the plaintext value and can print or transmit it.
-
 ## Hard guardrails
 
 - There is intentionally no command that prints a resolved credential.
-- Never invoke provider-native plaintext retrieval as a workaround.
-- Never place a secret in command arguments, chat, shell history, or clipboard.
+- Never invoke provider-native plaintext retrieval as a workaround, including
+  standalone `security ... -w`, `gh auth token`, `op read`, access-token print
+  commands, `env`, or `printenv`.
+- Never place a secret in command arguments, chat, shell history, clipboard, or
+  agent-visible tool output.
+- Never read files whose purpose is holding credentials, including `.env`,
+  `.pgpass`, agent auth files, and SSH private keys.
 - If a value appears in agent output or conversation context, stop, report the
   exposure without repeating it, and tell the user to rotate it.
-- Current provider support is limited to non-synchronizable generic passwords in
-  the default macOS Keychain.

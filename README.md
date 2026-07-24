@@ -63,10 +63,17 @@ secret.
 ## Agent skill
 
 The repository includes an optional agent skill at [`skills/ainv`](skills/ainv).
-Install it into the shared skills directory with:
+Install it into the canonical shared skills directory with:
 
 ```console
-ln -s "$(pwd)/skills/ainv" ~/.agents/skills/ainv
+mkdir -p ~/.agents/skills
+ditto skills/ainv ~/.agents/skills/ainv
+```
+
+Claude Code additionally needs a discovery symlink:
+
+```console
+ln -s ~/.agents/skills/ainv ~/.claude/skills/ainv
 ```
 
 ## Development
