@@ -18,8 +18,10 @@ The proposed product and security contract is documented in [SPEC.md](SPEC.md).
 
 ## Installation
 
+The package is not published to PyPI yet. From a local checkout:
+
 ```console
-uv tool install ainv
+uv tool install .
 ```
 
 ## Usage
