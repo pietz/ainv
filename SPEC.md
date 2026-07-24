@@ -138,7 +138,23 @@ providers are selected, discovery is all-or-nothing: any provider failure
 returns exit code 4 and no matches. Partial results are reserved for a future
 explicit mode and are never silently presented as complete.
 
-### 5.2 Materialize one secret into a dotenv file
+### 5.2 Add one credential to a provider
+
+```console
+ainv add OPENAI_API_KEY --provider keychain --account personal
+```
+
+`OPENAI_API_KEY` maps to the native Keychain service field. `--account` maps to
+its account field, and optional `--label` maps to its display label. The command
+accepts the secret only through two matching hidden prompts in an interactive
+terminal. It provides no value option and reads no secret from stdin.
+
+Creation is an optional provider capability. The Keychain provider creates one
+non-synchronizable generic-password item in the default legacy Keychain,
+returns its persistent reference, and never replaces a duplicate. Global
+`--no-input` fails before prompting.
+
+### 5.3 Materialize one secret into a dotenv file
 
 The default destination is `.env` in the current working directory:
 
@@ -196,7 +212,7 @@ Set OPENAI_API_KEY in .env from keychain (value hidden).
 The direct `set` command is intentionally singular. Bulk or manifest-driven
 materialization is deferred until real usage demonstrates a need.
 
-### 5.3 Inject selected secrets into one child process
+### 5.4 Inject selected secrets into one child process
 
 ```console
 ainv run \
@@ -231,7 +247,7 @@ The final point is important: child output cannot be reliably redacted without
 breaking terminal behavior or providing a false security guarantee. A child
 process can print or transmit any secret it receives.
 
-### 5.4 Inspect available providers
+### 5.5 Inspect available providers
 
 ```console
 ainv providers
@@ -250,6 +266,7 @@ Initial command surface:
 
 ```text
 ainv [--no-input] find QUERY [--provider NAME] [--limit N] [--json]
+ainv [--no-input] add SERVICE --provider NAME --account ACCOUNT [--label LABEL]
 ainv [--no-input] set REF --as NAME [--file PATH] [--allow-unignored] [--allow-tracked]
 ainv [--no-input] run NAME=REF [NAME=REF ...] [--] COMMAND [ARG ...]
 ainv providers [--json]
@@ -331,7 +348,7 @@ reference and never falls back to service/account matching.
 
 ### 8.1 Required provider capabilities
 
-Every provider implements:
+Every provider declares explicit capabilities. The common operations are:
 
 1. `status`: Report whether the provider is installed, authenticated, locked, or
    unavailable without returning credentials.
@@ -339,9 +356,12 @@ Every provider implements:
    data.
 3. `resolve`: Resolve one canonical reference to secret bytes for an explicit
    delivery operation.
+4. Optional `create`: Store one new credential through secure human input.
 
-Providers may support optional capabilities later, but `ainv` will not initially
-store, update, delete, rotate, or synchronize credentials.
+The internal registry maps provider names and opaque reference prefixes to
+trusted factories. It is ready for additional built-in providers but does not
+load third-party code dynamically yet. `ainv` owns no credential storage and
+does not update, delete, rotate, or synchronize credentials.
 
 ### 8.2 Initial providers
 
@@ -588,27 +608,34 @@ Those demonstrations prevent accidental overclaiming.
 - Human and JSON output.
 - No secret resolution yet.
 
-### Phase 2: Dotenv materialization
+### Phase 2: Keychain creation
+
+- Provider registry and explicit capabilities.
+- Confirmed hidden interactive input.
+- Native generic-password creation with duplicate refusal.
+- Persistent-reference output and isolated integration tests.
+
+### Phase 3: Dotenv materialization
 
 - Exact Keychain reference resolution.
 - Safe dotenv parser and encoder.
 - Atomic `ainv set` with permission and Git checks.
 - Canary leakage tests.
 
-### Phase 3: Process injection
+### Phase 4: Process injection
 
 - Binding parser and all-or-nothing resolution.
 - Exec-style `ainv run`.
 - Signal, TTY, and child-exit behavior tests.
 
-### Phase 4: 1Password provider
+### Phase 5: 1Password provider
 
 - Optional provider distribution or extra.
 - Metadata discovery through the official CLI.
 - `op://` reference resolution.
 - Locked and unauthenticated state handling.
 
-### Phase 5: Extension API
+### Phase 6: Extension API
 
 - Stabilize the smallest provider contract supported by two real adapters.
 - Choose entry points or executable plugins after a security review.
@@ -618,8 +645,8 @@ Those demonstrations prevent accidental overclaiming.
 
 The first functional release is complete when:
 
-1. A user can find an existing synthetic Keychain generic password from metadata
-   alone.
+1. A user can add and find a synthetic Keychain generic password without
+   exposing its value through CLI output.
 2. `ainv` output and diagnostics contain no secret value; tests separately
    demonstrate that child output and materialized files are outside the
    guarantee.

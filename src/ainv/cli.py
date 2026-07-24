@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import getpass
 import json
 import os
+import sys
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +22,7 @@ from ainv.dotenv import (
 )
 from ainv.errors import (
     CredentialNotFoundError,
+    InvalidCredentialMetadataError,
     ProviderAccessDeniedError,
     ProviderError,
     ProviderLockedError,
@@ -31,9 +34,17 @@ from ainv.git import (
     destination_status,
     enforce_destination_policy,
 )
-from ainv.models import CredentialMetadata, Secret
-from ainv.providers.base import CredentialProvider
+from ainv.models import CredentialMetadata, ProviderCapability, Secret
+from ainv.providers.base import CredentialCreator, CredentialProvider
 from ainv.providers.keychain import KeychainProvider, parse_persistent_reference
+from ainv.providers.registry import ProviderRegistry
+
+_PROVIDER_REGISTRY = ProviderRegistry()
+_PROVIDER_REGISTRY.register(
+    "keychain",
+    KeychainProvider,
+    reference_prefixes=("keychain://v1/item/",),
+)
 
 _SCHEMA_VERSION = 1
 
@@ -86,7 +97,7 @@ def providers_command(
     ] = False,
 ) -> None:
     """Show available credential providers without accessing secret values."""
-    status = _get_provider("keychain").status()
+    statuses = [_get_provider(name).status() for name in _PROVIDER_REGISTRY.names()]
     if as_json:
         typer.echo(
             json.dumps(
@@ -97,19 +108,28 @@ def providers_command(
                             "provider": status.provider,
                             "state": status.state.value,
                             "source": status.source,
+                            "capabilities": sorted(
+                                capability.value for capability in status.capabilities
+                            ),
                         }
+                        for status in statuses
                     ],
                 },
                 sort_keys=True,
             )
         )
         return
-    typer.echo("PROVIDER  STATUS  SOURCE")
-    typer.echo(
-        f"{_terminal_safe(status.provider)}  "
-        f"{_terminal_safe(status.state.value)}  "
-        f"{_terminal_safe(status.source)}"
-    )
+    typer.echo("PROVIDER  STATUS  SOURCE  CAPABILITIES")
+    for status in statuses:
+        capabilities = ",".join(
+            sorted(capability.value for capability in status.capabilities)
+        )
+        typer.echo(
+            f"{_terminal_safe(status.provider)}  "
+            f"{_terminal_safe(status.state.value)}  "
+            f"{_terminal_safe(status.source)}  "
+            f"{_terminal_safe(capabilities)}"
+        )
 
 
 @app.command("find")
@@ -163,6 +183,54 @@ def find_command(
             )
     if not matches:
         raise typer.Exit(3)
+
+
+@app.command("add")
+def add_command(
+    ctx: typer.Context,
+    service: Annotated[str, typer.Argument(help="Native credential service name.")],
+    provider_name: Annotated[
+        str, typer.Option("--provider", help="Credential provider to add to.")
+    ],
+    account: Annotated[
+        str, typer.Option("--account", help="Native credential account or scope.")
+    ],
+    label: Annotated[
+        str | None, typer.Option("--label", help="Optional human-readable label.")
+    ] = None,
+) -> None:
+    """Add one credential through confirmed hidden human input."""
+    if _no_input(ctx):
+        _fail("adding a credential requires interactive human input", 5)
+    try:
+        provider = _get_provider(provider_name)
+    except ProviderError as error:
+        _fail_provider(error)
+    if ProviderCapability.CREATE not in provider.capabilities or not isinstance(
+        provider, CredentialCreator
+    ):
+        _fail("credential provider does not support adding credentials", 1)
+
+    secret = _prompt_new_secret()
+    try:
+        metadata = provider.create(
+            service,
+            account=account,
+            label=label,
+            secret=secret,
+            no_input=False,
+        )
+    except InvalidCredentialMetadataError as error:
+        _fail(str(error), 2)
+    except ProviderError as error:
+        _fail_provider(error)
+
+    typer.echo(
+        f"Added {_terminal_safe(metadata.name)} to "
+        f"{_terminal_safe(metadata.provider)} for account "
+        f"{_terminal_safe(metadata.account)}."
+    )
+    typer.echo(f"Reference: {_terminal_safe(metadata.reference)}")
 
 
 @app.command("set")
@@ -254,14 +322,14 @@ def run_command(ctx: typer.Context) -> None:
 
 
 def _get_provider(name: str) -> CredentialProvider:
-    if name != "keychain":
-        raise ProviderUnavailableError()
-    return KeychainProvider()
+    return _PROVIDER_REGISTRY.get(name)
 
 
 def _provider_for_reference(reference: str) -> CredentialProvider:
-    parse_persistent_reference(reference)
-    return _get_provider("keychain")
+    provider_name = _PROVIDER_REGISTRY.provider_name_for_reference(reference)
+    if provider_name == "keychain":
+        parse_persistent_reference(reference)
+    return _get_provider(provider_name)
 
 
 def _parse_run_arguments(
@@ -295,6 +363,24 @@ def _parse_run_arguments(
     if not command:
         _fail("run requires a child command", 2)
     return bindings, command
+
+
+def _prompt_new_secret() -> Secret:
+    if not sys.stdin.isatty() or not sys.stderr.isatty():
+        _fail("adding a credential requires an interactive terminal", 5)
+    try:
+        value = getpass.getpass("Secret value: ")
+        confirmation = getpass.getpass("Confirm secret value: ")
+    except (EOFError, OSError):
+        _fail("secure credential input was cancelled or unavailable", 5)
+    if not value:
+        _fail("secret value must not be empty", 2)
+    if value != confirmation:
+        _fail("secret values did not match", 2)
+    try:
+        return Secret(value.encode("utf-8", "strict"))
+    except UnicodeEncodeError:
+        _fail("secret value is not valid UTF-8 text", 7)
 
 
 def _secret_text(secret: Secret, *, dotenv: bool) -> str:

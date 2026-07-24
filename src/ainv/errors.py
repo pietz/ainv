@@ -28,6 +28,18 @@ class CredentialNotFoundError(ProviderError):
     message = "credential was not found"
 
 
+class CredentialAlreadyExistsError(ProviderError):
+    """Creation would overwrite an existing provider credential."""
+
+    message = "credential already exists; existing values are never overwritten"
+
+
+class InvalidCredentialMetadataError(ProviderError, ValueError):
+    """Creation metadata is missing or unsafe for the selected provider."""
+
+    message = "credential service, account, or label is invalid"
+
+
 class CredentialAmbiguousError(ProviderError):
     """A supposedly exact native lookup did not identify one item."""
 

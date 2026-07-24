@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 from ainv.cli import app
 from ainv.models import (
     CredentialMetadata,
+    ProviderCapability,
     ProviderState,
     ProviderStatus,
     Secret,
@@ -26,6 +27,7 @@ class FakeProvider:
     value: bytes = CANARY.encode()
 
     name = "keychain"
+    capabilities = frozenset({ProviderCapability.SEARCH, ProviderCapability.RESOLVE})
 
     def status(self) -> ProviderStatus:
         return ProviderStatus("keychain", ProviderState.READY)
@@ -35,6 +37,31 @@ class FakeProvider:
 
     def resolve(self, reference: str, *, no_input: bool = False) -> Secret:
         return Secret(self.value)
+
+
+class FakeCreator(FakeProvider):
+    capabilities = FakeProvider.capabilities | {ProviderCapability.CREATE}
+    created_secret: bytes | None = None
+
+    def create(
+        self,
+        service: str,
+        *,
+        account: str,
+        secret: Secret,
+        label: str | None = None,
+        no_input: bool = False,
+    ) -> CredentialMetadata:
+        self.created_secret = secret.reveal()
+        return CredentialMetadata(
+            reference="keychain://v1/item/bmV3LWl0ZW0",
+            provider="keychain",
+            name=service,
+            account=account,
+            label=label or service,
+            kind="generic-password",
+            modified_at=None,
+        )
 
 
 def metadata(*, label: str = "Synthetic credential") -> CredentialMetadata:
@@ -98,6 +125,83 @@ def test_find_no_matches_has_distinct_exit_code(
 
     assert result.exit_code == 3
     assert json.loads(result.stdout)["matches"] == []
+
+
+def test_add_uses_hidden_secret_and_outputs_metadata_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = FakeCreator([metadata()])
+    install_provider(monkeypatch, provider)
+    monkeypatch.setattr("ainv.cli._prompt_new_secret", lambda: Secret(CANARY.encode()))
+
+    result = runner.invoke(
+        app,
+        [
+            "add",
+            "OPENAI_API_KEY",
+            "--provider",
+            "keychain",
+            "--account",
+            "personal",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert provider.created_secret == CANARY.encode()
+    assert "Reference: keychain://v1/item/bmV3LWl0ZW0" in result.stdout
+    assert CANARY not in result.stdout
+    assert CANARY not in result.stderr
+
+
+def test_add_unknown_provider_fails_before_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def must_not_prompt() -> Secret:
+        raise AssertionError("prompt must not run")
+
+    monkeypatch.setattr("ainv.cli._prompt_new_secret", must_not_prompt)
+
+    result = runner.invoke(
+        app,
+        [
+            "add",
+            "TOKEN",
+            "--provider",
+            "missing",
+            "--account",
+            "personal",
+        ],
+    )
+
+    assert result.exit_code == 4
+    assert result.stdout == ""
+    assert "credential provider is unavailable" in result.stderr
+
+
+def test_add_no_input_fails_before_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = FakeCreator([metadata()])
+    install_provider(monkeypatch, provider)
+
+    def must_not_prompt() -> Secret:
+        raise AssertionError("prompt must not run")
+
+    monkeypatch.setattr("ainv.cli._prompt_new_secret", must_not_prompt)
+
+    result = runner.invoke(
+        app,
+        [
+            "--no-input",
+            "add",
+            "TOKEN",
+            "--provider",
+            "keychain",
+            "--account",
+            "personal",
+        ],
+    )
+
+    assert result.exit_code == 5
+    assert provider.created_secret is None
 
 
 def test_set_writes_canary_only_to_ignored_destination(

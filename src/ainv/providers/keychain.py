@@ -16,8 +16,10 @@ from typing import Protocol
 from unicodedata import normalize
 
 from ainv.errors import (
+    CredentialAlreadyExistsError,
     CredentialAmbiguousError,
     CredentialNotFoundError,
+    InvalidCredentialMetadataError,
     InvalidReferenceError,
     ProviderAccessDeniedError,
     ProviderError,
@@ -25,7 +27,13 @@ from ainv.errors import (
     ProviderOperationError,
     ProviderUnavailableError,
 )
-from ainv.models import CredentialMetadata, ProviderState, ProviderStatus, Secret
+from ainv.models import (
+    CredentialMetadata,
+    ProviderCapability,
+    ProviderState,
+    ProviderStatus,
+    Secret,
+)
 
 _REFERENCE_PREFIX = "keychain://v1/item/"
 
@@ -38,6 +46,7 @@ _ERR_SEC_AUTH_FAILED = -25293
 _ERR_SEC_NOT_AVAILABLE = -25291
 _ERR_SEC_NO_SUCH_KEYCHAIN = -25294
 _ERR_SEC_INVALID_KEYCHAIN = -25295
+_ERR_SEC_DUPLICATE_ITEM = -25299
 _ERR_SEC_ITEM_NOT_FOUND = -25300
 _ERR_SEC_INTERACTION_NOT_ALLOWED = -25308
 
@@ -53,6 +62,8 @@ class KeychainConstants:
     return_attributes: object
     return_persistent_ref: object
     return_data: object
+    value_data: object
+    use_keychain: object
     match_limit: object
     match_limit_all: object
     match_limit_one: object
@@ -82,6 +93,11 @@ class KeychainBackend(Protocol):
     ) -> tuple[int, object | None]:
         """Run one Security.framework item query."""
 
+    def add_item(
+        self, attributes: Mapping[object, object]
+    ) -> tuple[int, object | None]:
+        """Add one item and return only its persistent reference."""
+
 
 class PyObjCSecurityBackend:
     """Production backend implemented directly with PyObjC Security bindings."""
@@ -101,6 +117,8 @@ class PyObjCSecurityBackend:
             return_attributes=Security.kSecReturnAttributes,
             return_persistent_ref=Security.kSecReturnPersistentRef,
             return_data=Security.kSecReturnData,
+            value_data=Security.kSecValueData,
+            use_keychain=Security.kSecUseKeychain,
             match_limit=Security.kSecMatchLimit,
             match_limit_all=Security.kSecMatchLimitAll,
             match_limit_one=Security.kSecMatchLimitOne,
@@ -131,7 +149,16 @@ class PyObjCSecurityBackend:
         # Passing None for the out parameter lets PyObjC return (status, item).
         try:
             result = self._security.SecItemCopyMatching(dict(query), None)
-        except (AttributeError, TypeError):
+        except Exception:  # noqa: BLE001 - native details must never escape
+            return _ERR_SEC_NOT_AVAILABLE, None
+        return _native_result(result)
+
+    def add_item(
+        self, attributes: Mapping[object, object]
+    ) -> tuple[int, object | None]:
+        try:
+            result = self._security.SecItemAdd(dict(attributes), None)
+        except Exception:  # noqa: BLE001 - attributes contain the secret value
             return _ERR_SEC_NOT_AVAILABLE, None
         return _native_result(result)
 
@@ -144,9 +171,16 @@ def _native_result(result: object) -> tuple[int, object | None]:
 
 
 class KeychainProvider:
-    """Search and resolve non-synchronizable legacy generic passwords only."""
+    """Create, search, and resolve legacy generic passwords."""
 
     name = "keychain"
+    capabilities = frozenset(
+        {
+            ProviderCapability.SEARCH,
+            ProviderCapability.RESOLVE,
+            ProviderCapability.CREATE,
+        }
+    )
 
     def __init__(self, backend: KeychainBackend | None = None) -> None:
         self._backend = backend
@@ -157,10 +191,16 @@ class KeychainProvider:
             status, _keychain = backend.default_keychain()
             self._raise_for_status(status)
         except ProviderLockedError:
-            return ProviderStatus(self.name, ProviderState.LOCKED)
+            return ProviderStatus(
+                self.name, ProviderState.LOCKED, capabilities=self.capabilities
+            )
         except ProviderError:
-            return ProviderStatus(self.name, ProviderState.UNAVAILABLE)
-        return ProviderStatus(self.name, ProviderState.READY)
+            return ProviderStatus(
+                self.name, ProviderState.UNAVAILABLE, capabilities=self.capabilities
+            )
+        return ProviderStatus(
+            self.name, ProviderState.READY, capabilities=self.capabilities
+        )
 
     def search(self, query: str, *, limit: int = 20) -> list[CredentialMetadata]:
         """Find matching metadata without ever requesting ``kSecReturnData``."""
@@ -200,6 +240,58 @@ class KeychainProvider:
         ]
         matches.sort(key=_metadata_sort_key)
         return matches[:limit]
+
+    def create(
+        self,
+        service: str,
+        *,
+        account: str,
+        secret: Secret,
+        label: str | None = None,
+        no_input: bool = False,
+    ) -> CredentialMetadata:
+        """Create one native generic-password item without replacing duplicates."""
+        service = _creation_metadata(service)
+        account = _creation_metadata(account)
+        label = service if label is None else _creation_metadata(label)
+
+        backend = self._get_backend()
+        keychain = self._default_keychain(backend)
+        constants = backend.constants
+        attributes: dict[object, object] = {
+            constants.item_class: constants.generic_password,
+            constants.synchronizable: False,
+            constants.use_keychain: keychain,
+            constants.attr_service: service,
+            constants.attr_account: account,
+            constants.attr_label: label,
+            constants.value_data: secret.reveal(),
+            constants.return_persistent_ref: True,
+            constants.use_authentication_ui: (
+                constants.authentication_ui_fail
+                if no_input
+                else constants.authentication_ui_allow
+            ),
+        }
+        status, result = backend.add_item(attributes)
+        if status == _ERR_SEC_DUPLICATE_ITEM:
+            raise CredentialAlreadyExistsError()
+        if status == _ERR_SEC_PARAM:
+            raise ProviderOperationError()
+        self._raise_for_status(status)
+        persistent_ref = _data_bytes(result)
+        if not persistent_ref:
+            raise ProviderOperationError()
+        return CredentialMetadata(
+            reference=format_persistent_reference(persistent_ref),
+            provider=self.name,
+            name=service,
+            account=account,
+            label=label,
+            kind="generic-password",
+            modified_at=None,
+            keychain="default",
+        )
 
     def resolve(self, reference: str, *, no_input: bool = False) -> Secret:
         """Resolve by persistent reference only, never service/account fallback."""
@@ -253,6 +345,8 @@ class KeychainProvider:
             return
         if status == _ERR_SEC_ITEM_NOT_FOUND:
             raise CredentialNotFoundError()
+        if status == _ERR_SEC_DUPLICATE_ITEM:
+            raise CredentialAlreadyExistsError()
         if status in (_ERR_SEC_USER_CANCELED, _ERR_SEC_AUTH_FAILED):
             raise ProviderAccessDeniedError()
         if status == _ERR_SEC_INTERACTION_NOT_ALLOWED:
@@ -289,6 +383,16 @@ class KeychainProvider:
             item_type=_string_attribute(attributes, constants.attr_type),
             keychain="default",
         )
+
+
+def _creation_metadata(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise InvalidCredentialMetadataError()
+    return value
 
 
 def format_persistent_reference(persistent_ref: bytes) -> str:

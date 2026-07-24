@@ -6,13 +6,15 @@ from datetime import UTC, datetime
 import pytest
 
 from ainv.errors import (
+    CredentialAlreadyExistsError,
     CredentialNotFoundError,
+    InvalidCredentialMetadataError,
     InvalidReferenceError,
     ProviderAccessDeniedError,
     ProviderLockedError,
     ProviderUnavailableError,
 )
-from ainv.models import ProviderState
+from ainv.models import ProviderCapability, ProviderState, Secret
 from ainv.providers.keychain import (
     KeychainConstants,
     KeychainProvider,
@@ -32,6 +34,8 @@ class FakeBackend:
         return_attributes="return-attributes",
         return_persistent_ref="return-persistent-ref",
         return_data="return-data",
+        value_data="value-data",
+        use_keychain="use-keychain",
         match_limit="match-limit",
         match_limit_all="all",
         match_limit_one="one",
@@ -60,6 +64,7 @@ class FakeBackend:
         self.default_result = default_result
         self.default_calls = 0
         self.queries: list[Mapping[object, object]] = []
+        self.added_items: list[Mapping[object, object]] = []
 
     def default_keychain(self) -> tuple[int, object | None]:
         self.default_calls += 1
@@ -69,6 +74,12 @@ class FakeBackend:
         self, query: Mapping[object, object]
     ) -> tuple[int, object | None]:
         self.queries.append(dict(query))
+        return self.responses.pop(0)
+
+    def add_item(
+        self, attributes: Mapping[object, object]
+    ) -> tuple[int, object | None]:
+        self.added_items.append(dict(attributes))
         return self.responses.pop(0)
 
 
@@ -134,6 +145,58 @@ def test_search_not_found_is_empty_result() -> None:
     backend = FakeBackend([(-25300, None)])
 
     assert KeychainProvider(backend).search("service") == []
+
+
+def test_create_targets_default_keychain_and_returns_reference() -> None:
+    backend = FakeBackend([(0, b"new-persistent-reference")])
+    provider = KeychainProvider(backend)
+
+    metadata = provider.create(
+        "OPENAI_API_KEY",
+        account="personal",
+        label=None,
+        secret=Secret(b"synthetic-create-canary"),
+        no_input=True,
+    )
+
+    assert metadata.name == "OPENAI_API_KEY"
+    assert metadata.account == "personal"
+    assert metadata.label == "OPENAI_API_KEY"
+    assert parse_persistent_reference(metadata.reference) == b"new-persistent-reference"
+    attributes = backend.added_items[0]
+    assert attributes["class"] == "generic-password"
+    assert attributes["synchronizable"] is False
+    assert attributes["use-keychain"] == "fake-default-keychain"
+    assert attributes["service"] == "OPENAI_API_KEY"
+    assert attributes["account"] == "personal"
+    assert attributes["label"] == "OPENAI_API_KEY"
+    assert attributes["value-data"] == b"synthetic-create-canary"
+    assert attributes["return-persistent-ref"] is True
+    assert attributes["authentication-ui"] == "fail"
+
+
+def test_create_refuses_duplicates_and_invalid_metadata_without_leaking() -> None:
+    backend = FakeBackend([(-25299, None)])
+    provider = KeychainProvider(backend)
+    canary = b"synthetic-create-canary"
+
+    with pytest.raises(CredentialAlreadyExistsError) as raised:
+        provider.create("SERVICE", account="personal", secret=Secret(canary))
+    assert canary.decode() not in str(raised.value)
+
+    for invalid in ("", " ", "bad\nmetadata", "bad\x00metadata"):
+        with pytest.raises(InvalidCredentialMetadataError):
+            provider.create(invalid, account="personal", secret=Secret(canary))
+
+
+def test_capabilities_are_explicit() -> None:
+    assert KeychainProvider.capabilities == frozenset(
+        {
+            ProviderCapability.SEARCH,
+            ProviderCapability.RESOLVE,
+            ProviderCapability.CREATE,
+        }
+    )
 
 
 def test_resolution_uses_exact_persistent_reference_and_no_input_fails_ui() -> None:

@@ -16,11 +16,12 @@ pytestmark = pytest.mark.skipif(
 def test_synthetic_persistent_reference_round_trip(tmp_path: Path) -> None:
     import Security
 
+    from ainv.models import Secret
     from ainv.providers.keychain import KeychainProvider, PyObjCSecurityBackend
 
     keychain_password = b"ainv-test-keychain-password"
-    service = b"AINV_SYNTHETIC_SERVICE"
-    account = b"ainv-synthetic-account"
+    service = "AINV_SYNTHETIC_SERVICE"
+    account = "ainv-synthetic-account"
     value = b"ainv-synthetic-value"
     keychain_path = os.fsencode(tmp_path / "synthetic.keychain-db")
 
@@ -35,27 +36,22 @@ def test_synthetic_persistent_reference_round_trip(tmp_path: Path) -> None:
     assert status == 0
 
     try:
-        add_result = Security.SecKeychainAddGenericPassword(
-            keychain,
-            len(service),
-            service,
-            len(account),
-            account,
-            len(value),
-            value,
-            None,
-        )
-        add_status = add_result[0] if isinstance(add_result, tuple) else add_result
-        assert add_status == 0
 
         class IsolatedBackend(PyObjCSecurityBackend):
             def default_keychain(self) -> tuple[int, object | None]:
                 return 0, keychain
 
         provider = KeychainProvider(IsolatedBackend())
+        created = provider.create(
+            service,
+            account=account,
+            secret=Secret(value),
+            no_input=True,
+        )
         matches = provider.search("AINV_SYNTHETIC_SERVICE")
 
         assert len(matches) == 1
+        assert created.reference == matches[0].reference
         assert matches[0].name == "AINV_SYNTHETIC_SERVICE"
         resolved = provider.resolve(matches[0].reference, no_input=True)
         assert resolved.reveal() == value

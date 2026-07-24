@@ -7,6 +7,14 @@ from datetime import datetime
 from enum import StrEnum
 
 
+class ProviderCapability(StrEnum):
+    """Operations a provider explicitly supports."""
+
+    SEARCH = "search"
+    RESOLVE = "resolve"
+    CREATE = "create"
+
+
 class ProviderState(StrEnum):
     """The non-secret availability state of a credential provider."""
 
@@ -22,6 +30,7 @@ class ProviderStatus:
     provider: str
     state: ProviderState
     source: str = "built-in"
+    capabilities: frozenset[ProviderCapability] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)

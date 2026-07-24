@@ -3,6 +3,7 @@
 `ainv` is a small, provider-neutral CLI for moving secrets without printing them.
 It is intended for humans and shell-capable coding agents that need to:
 
+- add credentials to an existing provider through hidden human input;
 - search credential stores using non-sensitive metadata;
 - write a selected credential directly into an environment file; and
 - inject selected credentials into one child process.
@@ -25,6 +26,14 @@ uv tool install .
 ```
 
 ## Usage
+
+Add a native Keychain credential through confirmed hidden input:
+
+```console
+ainv add OPENAI_API_KEY --provider keychain --account personal
+```
+
+`--label` is optional. Existing credentials are never overwritten.
 
 Search Keychain metadata without retrieving secret values:
 
@@ -50,6 +59,15 @@ overridden. Run `ainv <command> --help` for all options.
 
 The command surface will not include a generic operation that prints a resolved
 secret.
+
+## Agent skill
+
+The repository includes an optional agent skill at [`skills/ainv`](skills/ainv).
+Install it into the shared skills directory with:
+
+```console
+ln -s "$(pwd)/skills/ainv" ~/.agents/skills/ainv
+```
 
 ## Development
 
