@@ -1,7 +1,7 @@
 [project]
 name = "ainv"
 version = "0.1.0"
-description = "Move secrets from credential providers without printing them"
+description = "Agent-first credential delivery from existing providers"
 readme = "README.md"
 authors = [
     { name = "Paul-Louis Pröve" }

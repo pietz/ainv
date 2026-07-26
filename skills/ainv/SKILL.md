@@ -1,13 +1,15 @@
 ---
 name: ainv
-description: Store and use API keys, tokens, and passwords without exposing their values. Use when a task needs a credential, authenticated command, dotenv file, macOS Keychain item, 1Password secret, or help with a missing credential.
+description: Deliver credentials from existing providers to intended processes without exposing values in routine agent context. Use when a task needs a credential, authenticated command, dotenv file, macOS Keychain item, 1Password secret, or help with a missing credential.
 ---
 
 # ainv
 
-Keep secret values outside the agent context. Prefer an existing native login when
-one works; use `ainv` for macOS Keychain discovery, creation, and delivery.
-Treat `ainv --help` and `ainv <command> --help` as the syntax source of truth.
+Keep credential values out of routine agent context, shell arguments, and
+`ainv`'s normal output. Child output can still expose them. Prefer an existing
+native login when one works; use `ainv` for macOS Keychain discovery, creation,
+and delivery. Treat `ainv --help` and `ainv <command> --help` as the syntax
+source of truth.
 
 ## Choose the least-exposing path
 

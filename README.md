@@ -1,15 +1,26 @@
 # ainv
 
-`ainv` is a small, provider-neutral CLI for moving secrets without printing them.
-It is intended for humans and shell-capable coding agents that need to:
+`ainv` combines AI and environment. It is an agent-first credential delivery
+layer: agents select opaque references; intended processes receive credential
+values.
+
+> Give AI agents the environment they need, not the secrets behind it.
+>
+> This describes the intended normal workflow, not an enforcement guarantee
+> against malicious agents, repositories, dependencies, or child processes.
+
+It is a small, provider-neutral CLI for humans and shell-capable coding agents
+that need to:
 
 - add credentials to an existing provider through hidden human input;
 - search credential stores using non-sensitive metadata;
 - write a selected credential directly into an environment file; and
 - inject selected credentials into one child process.
 
-`ainv` is not a vault, daemon, cloud service, or MCP server. Credential providers
-remain the source of truth.
+`ainv` is not a secret manager, vault, daemon, cloud service, or MCP server.
+Credential providers remain the source of truth. Its main benefit is context
+hygiene: resolved values stay out of routine model context, shell arguments, and
+`ainv`'s normal output, but child output can still expose them.
 
 > [!IMPORTANT]
 > This project is an early development preview. The current release supports

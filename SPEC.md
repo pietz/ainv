@@ -6,8 +6,10 @@ Target: Public name-reservation and evaluation release
 
 ## 1. Purpose
 
-`ainv` is a small, stateless CLI that moves secrets from existing credential
-providers to an explicit destination without printing the secret value.
+`ainv` is an agent-first credential delivery layer: agents select opaque
+references, and intended processes receive credential values. It is a small,
+stateless CLI that delivers credentials from existing providers to an explicit
+destination without printing the credential value.
 
 It is designed for humans and shell-capable coding agents. The initial workflow
 is deliberately ad hoc and requires no project initialization or manifest:
