@@ -19,7 +19,14 @@ The proposed product and security contract is documented in [SPEC.md](SPEC.md).
 
 ## Installation
 
-This is a pre-alpha work in progress. Install the published package with:
+> [!WARNING]
+> Version 0.1.0 is a pre-alpha name-reservation and evaluation release. In the
+> current `uv tool` distribution, macOS Keychain trusts the uv-managed Python
+> interpreter, not the `ainv` command. Do not treat it as a stable,
+> least-privilege identity for unattended high-value credentials. See
+> [SECURITY.md](SECURITY.md) before choosing Keychain approval.
+
+Install the published package with:
 
 ```console
 uv tool install ainv
@@ -33,13 +40,17 @@ uv tool install .
 
 ## Usage
 
-Add a native Keychain credential through confirmed hidden input:
+Add a native Keychain credential through one hidden input prompt:
 
 ```console
 ainv add OPENAI_API_KEY --provider keychain --account personal
 ```
 
-`--label` is optional. Existing credentials are never overwritten.
+`--label` is optional. Existing credentials are never overwritten. A human may
+paste a newly issued credential from a browser into the hidden prompt. Agents
+must never read, inspect, or manipulate the clipboard. On success, the full
+opaque reference is labeled `Reference (non-secret identifier)` so it is not
+mistaken for a credential value.
 
 Search Keychain metadata without retrieving secret values:
 

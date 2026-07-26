@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import getpass
 import json
 import os
 import sys
+import termios
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -199,7 +199,7 @@ def add_command(
         str | None, typer.Option("--label", help="Optional human-readable label.")
     ] = None,
 ) -> None:
-    """Add one credential through confirmed hidden human input."""
+    """Add one credential through one hidden human input prompt."""
     if _no_input(ctx):
         _fail("adding a credential requires interactive human input", 5)
     try:
@@ -230,7 +230,9 @@ def add_command(
         f"{_terminal_safe(metadata.provider)} for account "
         f"{_terminal_safe(metadata.account)}."
     )
-    typer.echo(f"Reference: {_terminal_safe(metadata.reference)}")
+    typer.echo(
+        f"Reference (non-secret identifier): {_terminal_safe(metadata.reference)}"
+    )
 
 
 @app.command("set")
@@ -369,18 +371,63 @@ def _prompt_new_secret() -> Secret:
     if not sys.stdin.isatty() or not sys.stderr.isatty():
         _fail("adding a credential requires an interactive terminal", 5)
     try:
-        value = getpass.getpass("Secret value: ")
-        confirmation = getpass.getpass("Confirm secret value: ")
-    except (EOFError, OSError):
+        value = _read_hidden_input("Secret value: ")
+    except UnicodeDecodeError:
+        _fail("secret value is not valid UTF-8 text", 7)
+    except (EOFError, OSError, termios.error):
         _fail("secure credential input was cancelled or unavailable", 5)
     if not value:
         _fail("secret value must not be empty", 2)
-    if value != confirmation:
-        _fail("secret values did not match", 2)
     try:
         return Secret(value.encode("utf-8", "strict"))
     except UnicodeEncodeError:
         _fail("secret value is not valid UTF-8 text", 7)
+
+
+def _read_hidden_input(prompt: str) -> str:
+    """Read one UTF-8 terminal line with echo disabled, or fail closed.
+
+    ``getpass`` can fall back to visible input after it cannot disable echo. This
+    implementation opens the controlling terminal directly and has no fallback.
+    """
+    fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+    try:
+        original = termios.tcgetattr(fd)
+        hidden = original[:]
+        hidden[3] &= ~termios.ECHO
+        termios.tcsetattr(fd, termios.TCSAFLUSH, hidden)
+        try:
+            _write_terminal(fd, prompt.encode("ascii"))
+            value = _read_terminal_line(fd)
+        finally:
+            termios.tcsetattr(fd, termios.TCSAFLUSH, original)
+            _write_terminal(fd, b"\n")
+    finally:
+        os.close(fd)
+    return value.decode("utf-8", "strict")
+
+
+def _read_terminal_line(fd: int) -> bytes:
+    """Read through one newline, discarding any input already read after it."""
+    value = bytearray()
+    while True:
+        chunk = os.read(fd, 4096)
+        if not chunk:
+            raise EOFError
+        newline = chunk.find(b"\n")
+        if newline >= 0:
+            value.extend(chunk[:newline])
+            return bytes(value)
+        value.extend(chunk)
+
+
+def _write_terminal(fd: int, value: bytes) -> None:
+    """Write all terminal output without routing it through stdout or stderr."""
+    while value:
+        written = os.write(fd, value)
+        if written == 0:
+            raise OSError("could not write to terminal")
+        value = value[written:]
 
 
 def _secret_text(secret: Secret, *, dotenv: bool) -> str:

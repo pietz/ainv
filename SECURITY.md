@@ -25,6 +25,44 @@ agents, repositories, dependencies, or commands safe. Use `ainv run` only for
 an intended, trusted consumer and avoid debug or environment-dumping modes;
 this guidance is not an enforcement boundary.
 
+## Current macOS Keychain authorization limitation
+
+In the current `uv tool` Python distribution, macOS Keychain authorizes the
+uv-managed Python interpreter executable, not the `ainv` console script or the
+terminal. An `ainv`-created generic-password item receives the default creator
+ACL for that interpreter. Therefore, another script using that exact interpreter
+may retrieve such an item without a new Keychain prompt. This was observed with
+a synthetic item and is broader access than the `ainv` command name suggests.
+
+For a pre-existing item, choosing **Always Allow** is expected to authorize the
+shared interpreter for future retrieval without further notice. Choose **Allow
+Once**, not **Always Allow**, when an expected operation prompts. Allow Once
+does not make the current distribution a stable or least-privilege Keychain
+identity, and it does not remove the creator interpreter's access to an
+`ainv`-created item.
+
+The current interpreter is ad-hoc signed with a cdhash-based designated
+requirement. A different Python patch version was denied access in testing, so
+upgrades can cause authorization failures or renewed prompts. A dialog may
+identify `python3.13` rather than `ainv`; exact dialog wording has not been
+observed. `ainv find` is metadata-only and cannot prompt, while secret
+resolution for `ainv set` or `ainv run` can prompt.
+
+Version 0.1.0 is a pre-alpha name-reservation and evaluation release. Do not use
+the current Python distribution as a stable, least-privilege Keychain identity
+for unattended high-value credentials. A stable Developer ID-signed native
+identity is required before a stable release.
+
+## Hidden credential entry
+
+`ainv add` accepts a value through exactly one hidden interactive terminal
+prompt. A human may paste a newly issued credential from a browser into that
+prompt. It fails closed if it cannot disable terminal echo. Success output
+labels the complete opaque reference as a non-secret identifier, not a
+credential value. Agents must never read, inspect, or manipulate the clipboard,
+and must never provide a credential through stdin, arguments, chat, or tool
+output.
+
 ## Recovery and cleanup
 
 If a credential is exposed, revoke or rotate it with the remote issuer first.

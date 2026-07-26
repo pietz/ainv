@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
+import pty
+import select
+import signal
+import sys
+import termios
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
-from ainv.cli import app
+from ainv.cli import _prompt_new_secret, app
 from ainv.models import (
     CredentialMetadata,
     ProviderCapability,
@@ -134,6 +142,14 @@ def test_add_uses_hidden_secret_and_outputs_metadata_only(
     install_provider(monkeypatch, provider)
     monkeypatch.setattr("ainv.cli._prompt_new_secret", lambda: Secret(CANARY.encode()))
 
+    def must_not_construct_native_backend(*args: object, **kwargs: object) -> None:
+        raise AssertionError("the real Keychain backend must not be constructed")
+
+    monkeypatch.setattr(
+        "ainv.providers.keychain.PyObjCSecurityBackend.__init__",
+        must_not_construct_native_backend,
+    )
+
     result = runner.invoke(
         app,
         [
@@ -148,9 +164,234 @@ def test_add_uses_hidden_secret_and_outputs_metadata_only(
 
     assert result.exit_code == 0
     assert provider.created_secret == CANARY.encode()
-    assert "Reference: keychain://v1/item/bmV3LWl0ZW0" in result.stdout
+    assert (
+        "Reference (non-secret identifier): keychain://v1/item/bmV3LWl0ZW0"
+        in result.stdout
+    )
     assert CANARY not in result.stdout
     assert CANARY not in result.stderr
+
+
+class TTY:
+    def __init__(self) -> None:
+        self.output = ""
+
+    def isatty(self) -> bool:
+        return True
+
+    def write(self, value: str) -> int:
+        self.output += value
+        return len(value)
+
+    def flush(self) -> None:
+        pass
+
+
+class NonTTY:
+    def isatty(self) -> bool:
+        return False
+
+
+def test_hidden_prompt_reads_once_and_never_writes_canary(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    prompts: list[str] = []
+    terminal = TTY()
+    monkeypatch.setattr("ainv.cli.sys.stdin", TTY())
+    monkeypatch.setattr("ainv.cli.sys.stderr", terminal)
+    monkeypatch.setattr(
+        "ainv.cli._read_hidden_input",
+        lambda prompt: prompts.append(prompt) or CANARY,
+    )
+
+    secret = _prompt_new_secret()
+
+    captured = capsys.readouterr()
+    assert secret.reveal() == CANARY.encode()
+    assert prompts == ["Secret value: "]
+    assert CANARY not in captured.out
+    assert CANARY not in captured.err
+    assert CANARY not in terminal.output
+
+
+def test_hidden_prompt_rejects_empty_input(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    terminal = TTY()
+    monkeypatch.setattr("ainv.cli.sys.stdin", TTY())
+    monkeypatch.setattr("ainv.cli.sys.stderr", terminal)
+    monkeypatch.setattr("ainv.cli._read_hidden_input", lambda prompt: "")
+
+    with pytest.raises(typer.Exit) as error:
+        _prompt_new_secret()
+
+    captured = capsys.readouterr()
+    assert error.value.exit_code == 2
+    assert CANARY not in captured.out
+    assert CANARY not in captured.err
+    assert CANARY not in terminal.output
+
+
+def test_hidden_prompt_rejects_noninteractive_stdin_before_reading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("ainv.cli.sys.stdin", NonTTY())
+    monkeypatch.setattr("ainv.cli.sys.stderr", TTY())
+
+    def must_not_read(prompt: str) -> str:
+        raise AssertionError("hidden input must not be read from a pipe")
+
+    monkeypatch.setattr("ainv.cli._read_hidden_input", must_not_read)
+
+    with pytest.raises(typer.Exit) as error:
+        _prompt_new_secret()
+
+    assert error.value.exit_code == 5
+
+
+def test_hidden_prompt_fails_closed_when_echo_cannot_be_disabled(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    terminal = TTY()
+    closed: list[int] = []
+    monkeypatch.setattr("ainv.cli.sys.stdin", TTY())
+    monkeypatch.setattr("ainv.cli.sys.stderr", terminal)
+    monkeypatch.setattr("ainv.cli.os.open", lambda path, flags: 42)
+    monkeypatch.setattr("ainv.cli.os.close", closed.append)
+    monkeypatch.setattr("ainv.cli.termios.tcgetattr", lambda fd: [0, 0, 0, 0])
+
+    def cannot_disable_echo(fd: int, when: int, attributes: list[int]) -> None:
+        raise termios.error("terminal settings unavailable")
+
+    def must_not_read(fd: int) -> bytes:
+        raise AssertionError("input must not be read with echo enabled")
+
+    monkeypatch.setattr("ainv.cli.termios.tcsetattr", cannot_disable_echo)
+    monkeypatch.setattr("ainv.cli._read_terminal_line", must_not_read)
+
+    with pytest.raises(typer.Exit) as error:
+        _prompt_new_secret()
+
+    captured = capsys.readouterr()
+    assert error.value.exit_code == 5
+    assert closed == [42]
+    assert CANARY not in captured.out
+    assert CANARY not in captured.err
+    assert CANARY not in terminal.output
+
+
+def test_hidden_prompt_rejects_invalid_utf8(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    terminal = TTY()
+    monkeypatch.setattr("ainv.cli.sys.stdin", TTY())
+    monkeypatch.setattr("ainv.cli.sys.stderr", terminal)
+
+    def invalid_utf8(prompt: str) -> str:
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr("ainv.cli._read_hidden_input", invalid_utf8)
+
+    with pytest.raises(typer.Exit) as error:
+        _prompt_new_secret()
+
+    captured = capsys.readouterr()
+    assert error.value.exit_code == 7
+    assert CANARY not in captured.out
+    assert CANARY not in captured.err
+    assert CANARY not in terminal.output
+
+
+def _read_pty_until(fd: int, marker: bytes, timeout: float) -> bytearray:
+    output = bytearray()
+    deadline = time.monotonic() + timeout
+    while marker not in output:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("hidden-input prompt did not arrive")
+        readable, _, _ = select.select([fd], [], [], remaining)
+        if not readable:
+            continue
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError as error:
+            if error.errno == errno.EIO:
+                break
+            raise
+        if not chunk:
+            break
+        output.extend(chunk)
+    return output
+
+
+def _wait_for_pty_child(pid: int, fd: int, output: bytearray, timeout: float) -> int:
+    deadline = time.monotonic() + timeout
+    while True:
+        waited_pid, status = os.waitpid(pid, os.WNOHANG)
+        if waited_pid == pid:
+            while True:
+                readable, _, _ = select.select([fd], [], [], 0)
+                if not readable:
+                    return status
+                try:
+                    chunk = os.read(fd, 4096)
+                except OSError as error:
+                    if error.errno == errno.EIO:
+                        return status
+                    raise
+                if not chunk:
+                    return status
+                output.extend(chunk)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("hidden-input child did not exit")
+        readable, _, _ = select.select([fd], [], [], remaining)
+        if readable:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError as error:
+                if error.errno == errno.EIO:
+                    continue
+                raise
+            if chunk:
+                output.extend(chunk)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="PTYs require a POSIX terminal")
+def test_hidden_prompt_does_not_echo_pasted_canary_in_a_pty() -> None:
+    canary = b"AINV_PTY_SYNTHETIC_CANARY_8D31"
+    pid, fd = pty.fork()
+    if pid == 0:
+        try:
+            sys.stdin = os.fdopen(os.dup(0), "r", encoding="utf-8")
+            sys.stderr = os.fdopen(os.dup(2), "w", encoding="utf-8")
+            secret = _prompt_new_secret()
+        except (EOFError, OSError, UnicodeError, termios.error, typer.Exit):
+            os._exit(1)
+        os._exit(0 if secret.reveal() == canary else 1)
+
+    reaped = False
+    try:
+        output = _read_pty_until(fd, b"Secret value: ", timeout=5)
+        assert b"Secret value: " in output
+        os.write(fd, canary + b"\n")
+        status = _wait_for_pty_child(pid, fd, output, timeout=5)
+        reaped = True
+
+        assert os.WIFEXITED(status)
+        assert os.WEXITSTATUS(status) == 0
+        assert canary not in output
+    finally:
+        if not reaped:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
+        os.close(fd)
 
 
 def test_add_unknown_provider_fails_before_prompt(

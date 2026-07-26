@@ -1,8 +1,8 @@
 # ainv specification
 
-Status: Draft 0.1
+Status: Draft 0.1.0 pre-alpha
 
-Target: Initial public development release
+Target: Public name-reservation and evaluation release
 
 ## 1. Purpose
 
@@ -146,12 +146,17 @@ ainv add OPENAI_API_KEY --provider keychain --account personal
 
 `OPENAI_API_KEY` maps to the native Keychain service field. `--account` maps to
 its account field, and optional `--label` maps to its display label. The command
-accepts the secret only through two matching hidden prompts in an interactive
-terminal. It provides no value option and reads no secret from stdin.
+accepts the secret only through exactly one hidden prompt in an interactive
+terminal. It provides no value option and reads no secret from stdin. A human
+may paste a newly issued credential from a browser into that prompt. Agents
+must never read, inspect, or manipulate the clipboard. The prompt fails closed
+instead of accepting input if it cannot disable terminal echo.
 
 Creation is an optional provider capability. The Keychain provider creates one
 non-synchronizable generic-password item in the default legacy Keychain,
-returns its persistent reference, and never replaces a duplicate. Global
+returns its persistent reference, and never replaces a duplicate. Success
+output labels the complete reference `Reference (non-secret identifier)` to
+distinguish it from a credential value while keeping it usable. Global
 `--no-input` fails before prompting.
 
 ### 5.3 Materialize one secret into a dotenv file
@@ -303,7 +308,7 @@ agent instructions.
   Typer/Click usage errors occur before command execution and retain their
   normal human-readable form in the MVP.
 - Prompts are forbidden in `--json` mode.
-- Global `--no-input` fails rather than triggering CLI confirmation or
+- Global `--no-input` fails rather than triggering the hidden `add` prompt or
   provider-controlled authentication/approval UI. `ainv` never reads secret
   values from stdin. A piped or non-TTY stdin does not implicitly disable native
   Keychain approval UI because coding-agent subprocesses commonly lack a TTY;
@@ -426,6 +431,31 @@ Resolution must use the persistent identity returned by discovery with
 used for display, never as an arbitrary first-match selector. Explicit `set`
 and `run` operations may allow native Keychain approval UI; global `--no-input`
 disables it and fails closed.
+
+##### Current distribution authorization limitation
+
+Version 0.1.0 is a pre-alpha name-reservation and evaluation release. In the
+current `uv tool` Python distribution, Keychain authorizes the uv-managed Python
+interpreter executable, not the `ainv` console script or terminal. An
+`ainv`-created generic-password item receives the interpreter's default creator
+ACL. An unrelated script using that exact interpreter was observed to retrieve a
+synthetic item without a prompt. For a pre-existing item, **Always Allow** is
+expected to authorize the shared interpreter for future retrieval without
+further notice. **Allow Once** is the interim guidance for an expected prompt,
+but it does not remove the creator interpreter's access or make the distribution
+a stable, least-privilege identity.
+
+The current interpreter is ad-hoc signed with a cdhash-based designated
+requirement. A different Python patch version was denied during testing, so
+upgrades can cause authorization failures or renewed prompts. A Keychain dialog
+may identify `python3.13` rather than `ainv`; exact wording has not been
+observed. Metadata-only `find` cannot prompt, while resolution can prompt.
+
+Before a stable release, the project must investigate and adopt a stable,
+least-privilege, Developer ID-signed native Keychain authorization identity.
+Whether that takes the form of a native executable, helper, or another
+architecture remains open. No implementation language or packaging approach is
+selected by this requirement.
 
 Synchronizable/iCloud items are excluded because Apple does not support
 persistent references for them. Internet-password and certificate/private-key
@@ -651,7 +681,7 @@ Those demonstrations prevent accidental overclaiming.
 ### Phase 2: Keychain creation
 
 - Provider registry and explicit capabilities.
-- Confirmed hidden interactive input.
+- One hidden interactive input prompt.
 - Native generic-password creation with duplicate refusal.
 - Persistent-reference output and isolated integration tests.
 

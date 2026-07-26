@@ -53,10 +53,28 @@ ainv add OPENAI_API_KEY --provider keychain --account personal
 ```
 
 `--label` is optional. The user must run or complete this command in an
-interactive terminal and enter the value through its hidden confirmation
-prompts. Never request a credential in chat, accept it as a command argument,
-or pipe it into `ainv`. A Keychain authorization dialog can appear during
-first use; the user should approve it only when the operation is expected.
+interactive terminal and enter the value through its one hidden prompt. A human
+may safely paste a newly issued credential from a browser into that prompt.
+Agents must never read, inspect, or manipulate the clipboard. Never request a
+credential in chat, accept it as a command argument, or pipe it into `ainv`.
+The complete opaque reference in success output is labeled `Reference
+(non-secret identifier)`. It is usable for later `ainv` commands and is not the
+credential value.
+
+## Keychain authorization dialogs
+
+With the current `uv tool` Python distribution, a Keychain dialog may identify
+`python3.13` rather than `ainv`; this is possible, not confirmed dialog wording.
+When a dialog appears, stop for the human to verify that the requested operation
+is expected. Instruct them to choose **Allow Once**, not **Always Allow**. Do
+not coach around, suppress, bypass, or alter Keychain prompts or access controls.
+`ainv find` is metadata-only and cannot prompt. Resolving a pre-existing item
+for `ainv set` or `ainv run` can prompt.
+
+The dialog authorizes the uv-managed Python interpreter rather than the `ainv`
+console script. An `ainv`-created item already trusts its creator interpreter,
+so Allow Once does not make this distribution a stable, least-privilege identity
+for unattended high-value credentials.
 
 ## Inject into one command
 
