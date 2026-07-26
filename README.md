@@ -19,7 +19,13 @@ The proposed product and security contract is documented in [SPEC.md](SPEC.md).
 
 ## Installation
 
-The package is not published to PyPI yet. From a local checkout:
+This is a pre-alpha work in progress. Install the published package with:
+
+```console
+uv tool install ainv
+```
+
+For development from a local checkout:
 
 ```console
 uv tool install .
@@ -57,8 +63,30 @@ ainv run 'OPENAI_API_KEY=keychain://v1/item/REFERENCE' -- command
 `set` refuses tracked or non-ignored Git destinations unless explicitly
 overridden. Run `ainv <command> --help` for all options.
 
+> [!WARNING]
+> `ainv run` keeps resolved values out of its normal arguments and output, but
+> it gives them to the selected process. That process, its descendants,
+> dependencies, crash reporters, telemetry, and anything it invokes can read,
+> retain, transmit, or expose them. Use it only for an intended, trusted
+> consumer and avoid debug or environment-dumping modes. This is guidance, not
+> an enforcement boundary: `ainv` does not make untrusted agents, repositories,
+> dependencies, or commands safe.
+
 The command surface will not include a generic operation that prints a resolved
 secret.
+
+## References and cleanup
+
+A Keychain reference is an opaque local locator, not portable project
+configuration or a unique identifier for one immutable credential incarnation.
+It may become stale after identity metadata changes or deletion. If it no
+longer resolves, search again rather than reconstructing it from metadata.
+
+For private dogfood, remove an `ainv`-created Keychain item manually in Keychain
+Access by its service, account, and label. Remove a materialized dotenv entry
+manually without asking an agent to read the file. If a credential is exposed,
+revoke or rotate it with its remote issuer first. Removing the local Keychain
+item does not revoke it remotely.
 
 ## Agent skill
 
@@ -89,11 +117,15 @@ uv run ruff format --check .
 
 ## Security model
 
-`ainv` does not write resolved values to its own output, diagnostics, command
-arguments, or the clipboard. Once a secret is written to a file or injected into
-a child process, any process with sufficient access may still read, print, or
-transmit it. Child stdout and stderr pass through unchanged.
+`ainv` reduces accidental credential exposure by keeping resolved values out of
+its normal arguments and output. Once a secret is written to a file or injected
+into a child process, it can be read, retained, printed, transmitted, or exposed
+by that process, its descendants, dependencies, crash reporters, telemetry, or
+anything it invokes. Child stdout and stderr pass through unchanged. `ainv`
+does not make untrusted agents, repositories, dependencies, or commands safe.
 
 ## License
 
-License to be selected before the first stable release.
+No license has been granted yet. The published pre-alpha package is available
+for evaluation, but permission to copy, modify, or redistribute it has not been
+granted.

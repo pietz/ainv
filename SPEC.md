@@ -25,9 +25,9 @@ storage nor encryption.
 
 ## 2. Product principles
 
-1. **Safe by default.** `ainv` never writes resolved values to its own stdout,
-   stderr, logs, diagnostics, or arguments. Child output remains outside this
-   guarantee.
+1. **Safe by default.** `ainv` reduces accidental credential exposure by never
+   writing resolved values to its own stdout, stderr, logs, diagnostics, or
+   arguments. Child output remains outside this guarantee.
 2. **Stateless by default.** Discovery and delivery require no project files.
 3. **Provider neutral.** Providers expose a common CLI shape, while
    authentication, metadata, approval behavior, and failures remain
@@ -61,8 +61,8 @@ The initial product will not provide:
 
 - **Provider:** An existing credential system, such as macOS Keychain or
   1Password.
-- **Reference:** A stable, non-secret provider identifier for one credential or
-  field.
+- **Reference:** An opaque, non-secret provider locator for a credential or
+  field. Its scope and lifecycle are provider-specific.
 - **Metadata:** Non-secret descriptive attributes such as provider, service,
   account, label, type, and modification time.
 - **Binding:** A destination environment-variable name paired with a reference.
@@ -244,8 +244,12 @@ Behavior:
 - Do not capture, inspect, redact, or transform child stdout/stderr.
 
 The final point is important: child output cannot be reliably redacted without
-breaking terminal behavior or providing a false security guarantee. A child
-process can print or transmit any secret it receives.
+breaking terminal behavior or providing a false security guarantee. The selected
+process, its descendants, dependencies, crash reporters, telemetry, and anything
+it invokes can read, retain, print, transmit, or otherwise expose any secret it
+receives. Users and agents should provide credentials only to an intended,
+trusted consumer and avoid debug or environment-dumping modes. This guidance is
+not an enforcement boundary.
 
 ### 5.5 Inspect available providers
 
@@ -316,7 +320,10 @@ agent instructions.
 ## 7. References
 
 References are provider-owned opaque strings. The core identifies the provider
-from the URI scheme but must not reinterpret provider-specific components.
+from the URI scheme but must not reinterpret provider-specific components. A
+reference is a locator, not a globally portable identifier or a unique
+identifier for one immutable credential incarnation. Do not commit a reference
+as portable project configuration.
 
 Examples:
 
@@ -328,12 +335,8 @@ Requirements:
 
 - A reference must never contain the secret value.
 - A provider must return canonical references from discovery.
-- References must identify exactly one provider item and field where fields
-  exist. Descriptive service/account pairs are insufficient when duplicates are
-  possible.
-- References should remain valid when display labels change, where the provider
-  offers a stable identifier.
-- Human-readable references are preferred, but stability takes priority.
+- A provider must document a reference's scope and lifecycle. Descriptive
+  service/account pairs are insufficient when duplicates are possible.
 - URI components must be percent-encoded where required.
 - The core must preserve reference case and encoding exactly.
 
@@ -343,6 +346,41 @@ comes from Apple's persistent item reference and contains no descriptive
 service/account fields. The provider parses this exact prefix itself rather than
 using a normalizing URL parser. Resolution requests exactly that persistent
 reference and never falls back to service/account matching.
+
+### 7.1 macOS Keychain reference lifecycle
+
+A canonical Keychain reference is an opaque local Keychain locator. Apple
+documents persistent references as `CFData` that may be stored and passed
+between processes. Apple does not promise portability across Keychains,
+machines, migration, restore, sync, app identities, or access groups, and does
+not promise stability across updates.
+
+The following behavior was observed, not guaranteed, on macOS 15.7.7 arm64 in
+an isolated temporary file Keychain:
+
+- Updating secret data or the label preserved the reference, and the reference
+  resolved the updated data.
+- Updating service or account changed the reference and invalidated the prior
+  reference.
+- Deletion invalidated the current reference at that time.
+- Recreating a generic-password item with the same final service and account
+  produced the same reference bytes, so an old reference could resolve the
+  recreated item.
+
+Consequently, a reference can become stale after identity metadata changes or
+deletion, and it must not be treated as a permanent identity for one credential
+instance. On resolution failure, search again and use the newly returned
+canonical reference. `ainv` has no `replace` or `remove` command in the MVP.
+
+### 7.2 Manual cleanup and exposure recovery
+
+For private dogfood, cleanup is manual through Keychain Access. A user can
+identify an `ainv`-created item by its service, account, and label and remove it
+there. A user can also manually remove a materialized dotenv entry, but agents
+must not read the dotenv file to do so.
+
+If a credential is exposed, revoke or rotate it at the remote issuer first.
+Removing the local Keychain item does not revoke the credential remotely.
 
 ## 8. Provider model
 
@@ -494,8 +532,9 @@ Metadata-only discovery must not access secret data at all.
 
 - an agent or process reading a materialized `.env` file;
 - `ainv run` passing through child stdout/stderr containing the secret;
-- a child process reading or printing its injected environment;
-- a child process transmitting credentials over the network;
+- the selected process, its descendants, dependencies, crash reporters,
+  telemetry, or anything it invokes reading, retaining, printing, transmitting,
+  or otherwise exposing its injected environment;
 - another process with sufficient user privileges inspecting memory or files;
 - a malicious or compromised provider adapter;
 - provider-native tools being invoked directly by an agent;
@@ -512,8 +551,9 @@ The primary guarantee is:
 
 It does not guarantee:
 
-> An arbitrary shell-capable agent can use a plaintext credential but cannot
-> deliberately recover or misuse it.
+> An arbitrary shell-capable agent, repository, dependency, or command can use
+> a plaintext credential but cannot deliberately recover, retain, transmit, or
+> misuse it.
 
 A future proxy or capability broker would be a different product tier and is
 outside the initial scope.

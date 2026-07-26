@@ -28,7 +28,9 @@ workaround; pause and involve the user if no safe delivery path is available.
 When adding credentials, use the target environment-variable name as the
 Keychain service and an explicit scope such as `personal`, `workgenius`, or a
 client name as the account. Discovery returns an opaque persistent reference,
-which avoids ambiguous service-only retrieval.
+which avoids ambiguous service-only retrieval. Treat it as a local Keychain
+locator, not portable project configuration or an immutable credential ID. If it
+stops resolving, search again rather than reconstructing it from metadata.
 
 ## Find an existing credential
 
@@ -64,8 +66,12 @@ Prefer process injection when the consumer supports environment variables:
 ainv run 'OPENAI_API_KEY=keychain://v1/item/REFERENCE' -- command
 ```
 
-Do not run environment-dumping or debug commands inside `ainv run`. The child
-process receives the plaintext value and can print or transmit it.
+Use `ainv run` only for an intended, trusted consumer. Avoid debug or
+environment-dumping modes. The selected process, its descendants, dependencies,
+crash reporters, telemetry, and anything it invokes receive or can access the
+plaintext value and can retain, print, transmit, or expose it. These
+instructions are not an enforcement boundary: `ainv` does not make untrusted
+agents, repositories, dependencies, or commands safe.
 
 ## Write one dotenv entry
 
@@ -78,6 +84,17 @@ The destination contains plaintext after this operation. Do not read, display,
 grep, summarize, or otherwise inspect it afterward. `ainv` refuses unsafe Git
 destinations unless an explicit override is given; do not use an override
 without the user's informed approval.
+
+## Cleanup and exposure recovery
+
+For private dogfood, a user can remove an `ainv`-created item manually in
+Keychain Access by its service, account, and label. A user may manually remove
+a materialized dotenv entry, but never ask an agent to read the dotenv file to
+do so. There is no `ainv replace` or `ainv remove` command.
+
+If a credential is exposed, stop and have the user revoke or rotate it with the
+remote issuer first. Removing the local Keychain item does not revoke it
+remotely.
 
 ## Hard guardrails
 

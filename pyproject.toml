@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Move secrets from credential providers without printing them"
 readme = "README.md"
 authors = [
-    { name = "Paul-Louis Pröve", email = "plp@workgenius.com" }
+    { name = "Paul-Louis Pröve" }
 ]
 requires-python = ">=3.13"
 classifiers = [
@@ -19,11 +19,6 @@ dependencies = [
     "pyobjc-framework-security>=11 ; sys_platform == 'darwin'",
     "typer>=0.16",
 ]
-
-[project.urls]
-Homepage = "https://github.com/pietz/ainv"
-Repository = "https://github.com/pietz/ainv"
-Issues = "https://github.com/pietz/ainv/issues"
 
 [project.scripts]
 ainv = "ainv.cli:main"

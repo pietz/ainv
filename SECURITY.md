@@ -15,9 +15,26 @@ rotate any credential that may have been exposed.
 
 ## Security boundary
 
-`ainv` is intended to keep resolved values out of its own output, diagnostics,
-command arguments, and clipboard workflows. A value written to a file can be
-read by processes with access to that file. A value injected into a child
-process can be read, printed, or transmitted by that process.
+`ainv` reduces accidental credential exposure by keeping resolved values out of
+its normal output, diagnostics, command arguments, and clipboard workflows. A
+value written to a file can be read by processes with access to that file. A
+value injected with `ainv run` can be read, retained, printed, transmitted, or
+otherwise exposed by the selected process, its descendants, dependencies, crash
+reporters, telemetry, or anything it invokes. `ainv` does not make untrusted
+agents, repositories, dependencies, or commands safe. Use `ainv run` only for
+an intended, trusted consumer and avoid debug or environment-dumping modes;
+this guidance is not an enforcement boundary.
 
-See [SPEC.md](SPEC.md) for the complete security model.
+## Recovery and cleanup
+
+If a credential is exposed, revoke or rotate it with the remote issuer first.
+Removing its local Keychain item does not revoke it remotely. For private
+dogfood, remove `ainv`-created items manually in Keychain Access by their
+service, account, and label. A materialized dotenv entry may also be removed
+manually, but an agent must not read the dotenv file to do so.
+
+A Keychain reference is an opaque local locator, not portable project
+configuration. It can become stale after identity metadata changes or deletion;
+search again if it no longer resolves.
+
+See [SPEC.md](SPEC.md) for the complete security model and reference lifecycle.
