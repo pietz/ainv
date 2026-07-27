@@ -1,25 +1,23 @@
 # ainv specification
 
-Status: Draft 0.1.0 pre-alpha
+Status: Draft 0.2.0 pre-alpha
 
-Target: Public name-reservation and evaluation release
+Target: Narrow public dogfood release with a hard validation threshold
 
 ## 1. Purpose
 
-`ainv` is an agent-first credential delivery layer: agents select opaque
-references, and intended processes receive credential values. It is a small,
-stateless CLI that delivers credentials from existing providers to an explicit
-destination without printing the credential value.
+`ainv` is an agent-operated credential handoff utility: agents select readable,
+value-free credential IDs, and intended processes or dotenv files receive
+credential values. It is a small, stateless CLI that delivers credentials from
+existing providers to an explicit destination without printing the value.
 
-It is designed for humans and shell-capable coding agents. The initial workflow
-is deliberately ad hoc and requires no project initialization or manifest:
+It is designed for ad hoc work, initial project onboarding, and conventional
+dotenv materialization. No project initialization or manifest is required:
 
 ```console
 ainv find openai
-ainv set 'keychain://v1/item/PERSISTENT_REF' \
-  --as OPENAI_API_KEY --file .env
-ainv run 'OPENAI_API_KEY=keychain://v1/item/PERSISTENT_REF' \
-  -- command
+ainv set keychain:OPENAI_API_KEY@personal --file .env
+ainv run keychain:OPENAI_API_KEY@personal -- command
 ```
 
 Credential providers remain the source of truth. `ainv` owns neither secret
@@ -31,9 +29,9 @@ storage nor encryption.
    writing resolved values to its own stdout, stderr, logs, diagnostics, or
    arguments. Child output remains outside this guarantee.
 2. **Stateless by default.** Discovery and delivery require no project files.
-3. **Provider neutral.** Providers expose a common CLI shape, while
+3. **Provider-owned values.** Providers remain the source of truth, while
    authentication, metadata, approval behavior, and failures remain
-   provider-specific.
+   provider-specific. Provider breadth is not a product goal.
 4. **Explicit delivery.** Every operation names its destination and variable.
 5. **Agent legible.** Help text, structured output, and errors explain the next
    valid action without requiring a large prompt or skill.
@@ -63,8 +61,10 @@ The initial product will not provide:
 
 - **Provider:** An existing credential system, such as macOS Keychain or
   1Password.
-- **Reference:** An opaque, non-secret provider locator for a credential or
-  field. Its scope and lifecycle are provider-specific.
+- **Credential ID:** A readable, non-secret provider/service/account identity
+  used for normal selection and delivery.
+- **Legacy reference:** An opaque provider locator retained for compatibility
+  and rare disambiguation. Its scope and lifecycle are provider-specific.
 - **Metadata:** Non-secret descriptive attributes such as provider, service,
   account, label, type, and modification time.
 - **Binding:** A destination environment-variable name paired with a reference.
@@ -88,18 +88,16 @@ MVP. Results use a conservative default limit of 20, with a maximum of 100,
 and are ordered by provider, normalized service/name, account, and canonical
 reference for deterministic output. Provider metadata is escaped before human
 terminal rendering to prevent control-character, terminal-sequence, or Rich
-markup injection. The human table abbreviates long references by preserving a
-substantial prefix and the final characters. This is display-only; JSON retains
-the exact canonical reference.
+markup injection. The human table prefers readable credential IDs and
+abbreviates unusually long IDs by preserving a substantial prefix and final
+characters. JSON retains the exact readable ID and legacy opaque reference.
 
 Example human-readable output:
 
 ```text
-REFERENCE                           PROVIDER  SERVICE         ACCOUNT   LABEL
+CREDENTIAL ID                       PROVIDER  SERVICE         ACCOUNT   LABEL
 ──────────────────────────────────  ────────  ──────────────  ────────  ──────────────
-keychain://v1/item/PERS...T_REF     keychain  OPENAI_API_KEY  personal  OpenAI API key
-
-Use --json for complete references.
+keychain:OPENAI_API_KEY@personal    keychain  OPENAI_API_KEY  personal  OpenAI API key
 ```
 
 Search is case-insensitive across provider-approved metadata fields. It never
@@ -113,11 +111,12 @@ ainv find openai --json
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "query": "openai",
   "partial": false,
   "matches": [
     {
+      "id": "keychain:OPENAI_API_KEY@personal",
       "ref": "keychain://v1/item/PERSISTENT_REF",
       "provider": "keychain",
       "name": "OPENAI_API_KEY",
@@ -162,35 +161,43 @@ instead of accepting input if it cannot disable terminal echo.
 
 Creation is an optional provider capability. The Keychain provider creates one
 non-synchronizable generic-password item in the default legacy Keychain,
-returns its persistent reference, and never replaces a duplicate. Success
-output labels the complete reference `Reference (non-secret identifier)` to
-distinguish it from a credential value while keeping it usable. Global
-`--no-input` fails before prompting.
+returns both readable and persistent identities, and never replaces a
+duplicate. Success output labels the readable credential ID as non-secret to
+distinguish it from a credential value. Global `--no-input` fails before
+prompting.
 
-### 5.3 Materialize one secret into a dotenv file
+### 5.3 Materialize credentials into a dotenv file
 
-The default destination is `.env` in the current working directory:
+The default destination is `.env` in the current working directory. A readable
+Keychain service that is a valid environment-variable name is inferred:
 
 ```console
-ainv set 'keychain://v1/item/PERSISTENT_REF' --as OPENAI_API_KEY
+ainv set keychain:OPENAI_API_KEY@personal
 ```
 
-An explicit destination can be supplied:
+Explicit destination names and multiple all-or-nothing bindings are supported:
 
 ```console
-ainv set 'keychain://v1/item/PERSISTENT_REF' \
-  --as OPENAI_API_KEY --file .env.local
+ainv set \
+  API_KEY=keychain:OPENAI_API_KEY@personal \
+  keychain:DATABASE_URL@work \
+  --file .env.local
 ```
 
 Behavior:
 
 - Variable names use `[A-Za-z_][A-Za-z0-9_]*` in both `set` and `run`.
 - Require a UTF-8 destination, optionally with a UTF-8 BOM.
-- If exactly one `OPENAI_API_KEY` assignment exists, replace that complete line
-  with a canonical assignment.
-- If none exists, append one assignment with a separating newline when needed.
+- If no target assignment exists, append it at the bottom.
+- Treat `NAME=`, whitespace-only values, `NAME=""`, and `NAME=''` as empty
+  placeholders and fill them without an override. Treat comment-bearing
+  assignments conservatively as populated.
+- Refuse a populated target before resolving any credential unless `--force`
+  is passed. Agents require informed user approval before using `--force`.
 - Reject duplicate target assignments and malformed target lines before
-  resolving the credential.
+  resolving any credential.
+- Resolve every binding before mutation and replace the destination exactly
+  once. Any failure leaves all target assignments unchanged.
 - Preserve all unrelated text, comments, ordering, and the dominant line ending.
 - Never display the resolved value or include it in an argument.
 - Create new files with mode `0600`.
@@ -222,28 +229,31 @@ Success output contains metadata only:
 Set OPENAI_API_KEY in .env from keychain (value hidden).
 ```
 
-The direct `set` command is intentionally singular. Bulk or manifest-driven
-materialization is deferred until real usage demonstrates a need.
+`--force` only permits replacement of populated assignments. It never bypasses
+Git, ownership, link, destination-type, or permission protections. Legacy
+`ainv set REF --as NAME` syntax remains accepted during the pre-alpha period.
 
 ### 5.4 Inject selected secrets into one child process
 
 ```console
-ainv run \
-  'OPENAI_API_KEY=keychain://v1/item/PERSISTENT_REF' \
-  -- npm run dev
+ainv run keychain:OPENAI_API_KEY@personal -- npm run dev
 ```
 
 Multiple bindings are accepted:
 
 ```console
 ainv run \
-  'OPENAI_API_KEY=keychain://v1/item/PERSISTENT_REF' \
-  'DATABASE_URL=keychain://v1/item/ANOTHER_PERSISTENT_REF' \
+  API_KEY=keychain:OPENAI_API_KEY@personal \
+  keychain:DATABASE_URL@work \
   -- npm run dev
 ```
 
 Behavior:
 
+- Infer a destination only from readable IDs whose service is a valid,
+  non-sensitive environment-variable name. Require explicit `NAME=CREDENTIAL`
+  syntax for execution-sensitive names such as `PATH`, language startup hooks,
+  and dynamic-loader variables.
 - Resolve every binding before starting the command.
 - If any resolution fails, start nothing.
 - Add resolved values to a copy of the current environment.
@@ -284,8 +294,8 @@ Initial command surface:
 ```text
 ainv [--no-input] find QUERY [--provider NAME] [--limit N] [--json]
 ainv [--no-input] add SERVICE --provider NAME --account ACCOUNT [--label LABEL]
-ainv [--no-input] set REF --as NAME [--file PATH] [--allow-unignored] [--allow-tracked]
-ainv [--no-input] run NAME=REF [NAME=REF ...] [--] COMMAND [ARG ...]
+ainv [--no-input] set [NAME=]CREDENTIAL... [--file PATH] [--force] [--allow-unignored] [--allow-tracked]
+ainv [--no-input] run [NAME=]CREDENTIAL... [--] COMMAND [ARG ...]
 ainv providers [--json]
 ainv --help
 ainv --version
@@ -311,8 +321,8 @@ agent instructions.
 - Human output goes to stdout; warnings and errors go to stderr.
 - `--json` emits one JSON document and no decorations or progress indicators.
   It is initially supported by `find` and `providers` only.
-- JSON success documents include `schema_version: 1`. Runtime JSON failures use
-  `{\"schema_version\": 1, \"error\": {\"code\": ..., \"message\": ...}}`.
+- JSON success documents include `schema_version: 2`. Runtime JSON failures use
+  `{\"schema_version\": 2, \"error\": {\"code\": ..., \"message\": ...}}`.
   Typer/Click usage errors occur before command execution and retain their
   normal human-readable form in the MVP.
 - Prompts are forbidden in `--json` mode.
@@ -327,38 +337,40 @@ agent instructions.
   secret access exits 5.
 - Debug logging must never include resolved values, child environments, or
   credential-bearing temporary-file contents.
-- Secret references may appear in output and logs because they are the tool's
-  non-secret handles.
+- Credential IDs and legacy references may appear in output and logs because
+  they are non-secret handles, although they can disclose operational metadata.
 
-## 7. References
+## 7. Credential identities
 
-References are provider-owned opaque strings. The core identifies the provider
-from the URI scheme but must not reinterpret provider-specific components. A
-reference is a locator, not a globally portable identifier or a unique
-identifier for one immutable credential incarnation. Do not commit a reference
-as portable project configuration.
+The normal Keychain ID is:
 
-Examples:
+```text
+keychain:<percent-encoded-service>@<percent-encoded-account>
+```
+
+For example:
+
+```text
+keychain:OPENAI_API_KEY@personal
+```
+
+Resolution first performs an exact metadata-only service/account lookup with
+Keychain authentication UI disabled. It proceeds only when exactly one
+persistent reference is returned, then resolves that opaque locator through the
+normal delivery path. It never chooses an arbitrary first match. Components are
+strict UTF-8 and canonical percent encoding; malformed or non-canonical IDs are
+rejected.
+
+Legacy references remain accepted:
 
 ```text
 keychain://v1/item/PERSISTENT_REF
 ```
 
-Requirements:
-
-- A reference must never contain the secret value.
-- A provider must return canonical references from discovery.
-- A provider must document a reference's scope and lifecycle. Descriptive
-  service/account pairs are insufficient when duplicates are possible.
-- URI components must be percent-encoded where required.
-- The core must preserve reference case and encoding exactly.
-
-The canonical MVP format is
-`keychain://v1/item/<base64url-unpadded-persistent-reference>`. The opaque token
-comes from Apple's persistent item reference and contains no descriptive
-service/account fields. The provider parses this exact prefix itself rather than
-using a normalizing URL parser. Resolution requests exactly that persistent
-reference and never falls back to service/account matching.
+The opaque token is Apple's persistent item reference encoded as unpadded
+base64url. It contains no descriptive service/account fields. Both identity
+forms are non-secret metadata, but neither is portable project configuration or
+a unique identifier for one immutable credential incarnation.
 
 ### 7.1 macOS Keychain reference lifecycle
 
@@ -403,16 +415,16 @@ Every provider declares explicit capabilities. The common operations are:
 
 1. `status`: Report whether the provider is installed, authenticated, locked, or
    unavailable without returning credentials.
-2. `search`: Return metadata and canonical references without requesting secret
-   data.
-3. `resolve`: Resolve one canonical reference to secret bytes for an explicit
-   delivery operation.
+2. `search`: Return metadata, readable IDs, and legacy references without
+   requesting secret data.
+3. `resolve`: Resolve one exact credential identity to secret bytes for an
+   explicit delivery operation.
 4. Optional `create`: Store one new credential through secure human input.
 
-The internal registry maps provider names and opaque reference prefixes to
-trusted factories. It is ready for additional built-in providers but does not
-load third-party code dynamically yet. `ainv` owns no credential storage and
-does not update, delete, rotate, or synchronize credentials.
+The internal registry maps provider names and credential prefixes to trusted
+factories. Version 0.2.0 ships only the Keychain provider and loads no third-party
+code. `ainv` owns no credential storage and does not update, delete, rotate, or
+synchronize credentials.
 
 ### 8.2 Initial providers
 
@@ -442,8 +454,8 @@ disables it and fails closed.
 
 ##### Current distribution authorization limitation
 
-Version 0.1.0 is a pre-alpha name-reservation and evaluation release. In the
-current `uv tool` Python distribution, Keychain authorizes the uv-managed Python
+Version 0.2.0 remains a pre-alpha evaluation release. In the current `uv tool`
+Python distribution, Keychain authorizes the uv-managed Python
 interpreter executable, not the `ainv` console script or terminal. An
 `ainv`-created generic-password item receives the interpreter's default creator
 ACL. An unrelated script using that exact interpreter was observed to retrieve a
@@ -470,38 +482,13 @@ persistent references for them. Internet-password and certificate/private-key
 records are also deferred. Their identity, approval behavior, and delivery
 semantics differ from legacy generic-password entries.
 
-#### Deferred: 1Password
+### 8.3 Provider scope
 
-1Password is not part of the normative MVP. A later adapter should delegate to
-the official `op` CLI, pin a documented supported version range, use exact
-metadata-only discovery and field-only resolution commands, invoke no shell,
-capture stdout internally, sanitize provider stderr, and reject duplicate or
-ambiguous fields. Its authentication, network access, locking, and prompts are
-provider-controlled and must be documented explicitly.
-
-### 8.3 Extension strategy
-
-The core will use a small in-process internal provider protocol with typed
-results, cancellation behavior, and sanitized exceptions. It remains private
-and unstable until two real adapters validate it. A public third-party plugin
-API and external provider executables are deferred because their discovery,
-trust, versioning, timeout, and secret-transport model require a separate
-security design.
-
-Likely future distribution model:
-
-```text
-ainv                         core CLI
-ainv-provider-keychain       macOS provider, possibly bundled on macOS
-ainv-provider-1password      optional provider
-ainv-provider-bitwarden      future third-party provider
-```
-
-Possible plugin mechanisms include Python entry points and isolated provider
-executables. The choice remains open. The design must account for the fact that
-provider code is security-sensitive and will handle plaintext during
-resolution. Installing a provider is equivalent to trusting it with any secret
-it is allowed to resolve.
+Provider breadth is explicitly deferred. `ainv` will not compete with fnox,
+Varlock, SecretSpec, or vault products on integrations. The private protocol
+remains only an internal boundary. A second provider requires demonstrated
+repeated demand and a separate security review because provider code handles
+plaintext during resolution.
 
 ## 9. Dotenv mutation rules
 
@@ -691,11 +678,12 @@ Those demonstrations prevent accidental overclaiming.
 - Provider registry and explicit capabilities.
 - One hidden interactive input prompt.
 - Native generic-password creation with duplicate refusal.
-- Persistent-reference output and isolated integration tests.
+- Readable service/account ID output plus legacy persistent references.
+- Isolated integration tests.
 
 ### Phase 3: Dotenv materialization
 
-- Exact Keychain reference resolution.
+- Exact readable-ID and legacy-reference Keychain resolution.
 - Safe dotenv parser and encoder.
 - Atomic `ainv set` with permission and Git checks.
 - Canary leakage tests.
@@ -706,18 +694,14 @@ Those demonstrations prevent accidental overclaiming.
 - Exec-style `ainv run`.
 - Signal, TTY, and child-exit behavior tests.
 
-### Phase 5: 1Password provider
+### Phase 5: Narrow product validation
 
-- Optional provider distribution or extra.
-- Metadata discovery through the official CLI.
-- `op://` reference resolution.
-- Locked and unauthenticated state handling.
-
-### Phase 6: Extension API
-
-- Stabilize the smallest provider contract supported by two real adapters.
-- Choose entry points or executable plugins after a security review.
-- Publish provider-author guidance and conformance tests.
+- Dogfood readable discovery and delivery across ad hoc tasks.
+- Validate repeated external use before adding destinations or providers.
+- Keep shell sessions, MCP, manifests, policy engines, and provider plugins out
+  of scope.
+- Investigate a stable signed native identity only if usage justifies broader
+  public promotion.
 
 ## 15. Acceptance criteria for the first functional release
 
@@ -728,9 +712,9 @@ The first functional release is complete when:
 2. `ainv` output and diagnostics contain no secret value; tests separately
    demonstrate that child output and materialized files are outside the
    guarantee.
-3. A user can select the returned reference and atomically set one `.env`
-   assignment without displaying the value.
-4. A user can inject the same reference into one child process.
+3. A user can select a returned readable ID and atomically set one or more
+   `.env` assignments without displaying values.
+4. A user can inject the same readable ID into one child process.
 5. Denied, missing, malformed, duplicate, and interrupted operations fail
    without partial output or destination corruption.
 6. Documentation states the security boundary and demonstrates its limitations.
@@ -741,12 +725,9 @@ The first functional release is complete when:
 
 The following should be resolved through prototypes rather than speculation:
 
-1. Whether Keychain support remains in the core package after other platforms
-   or providers are supported.
-2. Exact dotenv compatibility targets beyond the documented MVP grammar.
-3. Whether Git overrides should require interactive approval in addition to an
-   explicit flag.
-4. Minimum supported macOS version.
-5. Package license and public author identity.
-6. Third-party provider mechanism, deferred until after 1Password validates the
-   internal abstraction.
+1. Exact dotenv compatibility targets beyond the documented grammar.
+2. Whether Git or populated-value overrides should require interactive approval
+   in addition to explicit flags.
+3. Minimum supported macOS version.
+4. Package license and public author identity.
+5. Whether repeated usage justifies a stable signed native identity.

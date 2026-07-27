@@ -48,17 +48,17 @@ identify `python3.13` rather than `ainv`; exact dialog wording has not been
 observed. `ainv find` is metadata-only and cannot prompt, while secret
 resolution for `ainv set` or `ainv run` can prompt.
 
-Version 0.1.0 is a pre-alpha name-reservation and evaluation release. Do not use
-the current Python distribution as a stable, least-privilege Keychain identity
-for unattended high-value credentials. A stable Developer ID-signed native
-identity is required before a stable release.
+Version 0.2.0 remains a pre-alpha evaluation release. Do not use the current
+Python distribution as a stable, least-privilege Keychain identity for
+unattended high-value credentials. A stable Developer ID-signed native identity
+is required before a stable release.
 
 ## Hidden credential entry
 
 `ainv add` accepts a value through exactly one hidden interactive terminal
 prompt. A human may paste a newly issued credential from a browser into that
 prompt. It fails closed if it cannot disable terminal echo. Success output
-labels the complete opaque reference as a non-secret identifier, not a
+labels a readable service/account credential ID as non-secret metadata, not a
 credential value. Agents must never read, inspect, or manipulate the clipboard,
 and must never provide a credential through stdin, arguments, chat, or tool
 output.
@@ -71,8 +71,10 @@ dogfood, remove `ainv`-created items manually in Keychain Access by their
 service, account, and label. A materialized dotenv entry may also be removed
 manually, but an agent must not read the dotenv file to do so.
 
-A Keychain reference is an opaque local locator, not portable project
-configuration. It can become stale after identity metadata changes or deletion;
-search again if it no longer resolves.
+A readable Keychain ID contains service and account metadata and resolves only
+when that pair identifies exactly one item. It is not portable project
+configuration and may disclose operational metadata. Legacy opaque references
+remain local locators and can become stale after identity metadata changes or
+deletion. Search again if an identity no longer resolves.
 
 See [SPEC.md](SPEC.md) for the complete security model and reference lifecycle.

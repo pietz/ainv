@@ -10,10 +10,13 @@ from ainv.dotenv import (
     DotenvFormatError,
     InvalidSecretValueError,
     InvalidVariableNameError,
+    PopulatedVariableError,
     UnsafeDotenvFileError,
     encode_value,
     mutate_dotenv,
+    mutate_dotenv_many,
     validate_dotenv_destination,
+    validate_dotenv_destinations,
 )
 
 
@@ -26,7 +29,7 @@ def test_replaces_exact_assignment_and_preserves_unrelated_utf8_bytes(
     )
     destination.write_bytes(original)
 
-    mutate_dotenv(destination, "TOKEN", "new=value")
+    mutate_dotenv(destination, "TOKEN", "new=value", force=True)
 
     assert destination.read_bytes() == (
         b"\xef\xbb\xbf# keep\r\nTOKEN=new=value\r\nTOKEN_EXTRA=unchanged\r\n"
@@ -78,7 +81,7 @@ def test_replacement_canonicalizes_only_target_assignment(tmp_path: Path) -> Non
         "  export TOKEN = ignored # remains only when unrelated\nOTHER = keep\n"
     )
 
-    mutate_dotenv(destination, "TOKEN", "canonical-value")
+    mutate_dotenv(destination, "TOKEN", "canonical-value", force=True)
 
     assert destination.read_text() == "TOKEN=canonical-value\nOTHER = keep\n"
 
@@ -94,8 +97,103 @@ def test_duplicate_or_malformed_target_fails_without_modifying_file(
 
     with pytest.raises(DotenvFormatError):
         mutate_dotenv(destination, "TOKEN", "synthetic-canary")
+    with pytest.raises(DotenvFormatError):
+        mutate_dotenv(destination, "TOKEN", "synthetic-canary", force=True)
 
     assert destination.read_bytes() == source
+
+
+@pytest.mark.parametrize(
+    "placeholder", ["TOKEN=\n", "TOKEN =   \n", 'TOKEN=""\n', "TOKEN=''\n"]
+)
+def test_empty_placeholders_are_filled_without_force(
+    tmp_path: Path, placeholder: str
+) -> None:
+    destination = tmp_path / "dotenv"
+    destination.write_text(placeholder)
+
+    mutate_dotenv(destination, "TOKEN", "value")
+
+    assert destination.read_text() == "TOKEN=value\n"
+
+
+def test_comment_only_assignment_is_conservatively_populated(tmp_path: Path) -> None:
+    destination = tmp_path / "dotenv"
+    destination.write_text("TOKEN= # intentionally blank\n")
+
+    with pytest.raises(PopulatedVariableError):
+        mutate_dotenv(destination, "TOKEN", "new")
+
+    assert destination.read_text() == "TOKEN= # intentionally blank\n"
+
+
+def test_populated_assignment_requires_force(tmp_path: Path) -> None:
+    destination = tmp_path / "dotenv"
+    destination.write_text("TOKEN=old\n")
+
+    with pytest.raises(PopulatedVariableError):
+        validate_dotenv_destination(destination, "TOKEN")
+    with pytest.raises(PopulatedVariableError):
+        mutate_dotenv(destination, "TOKEN", "new")
+    assert destination.read_text() == "TOKEN=old\n"
+
+    mutate_dotenv(destination, "TOKEN", "new", force=True)
+
+    assert destination.read_text() == "TOKEN=new\n"
+
+
+def test_multi_mutation_is_one_atomic_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "dotenv"
+    destination.write_text("FIRST=\nOTHER=keep\n")
+    replacements = 0
+    original_replace = os.replace
+
+    def count_replace(*args: object, **kwargs: object) -> None:
+        nonlocal replacements
+        replacements += 1
+        original_replace(*args, **kwargs)
+
+    monkeypatch.setattr("ainv.dotenv.os.replace", count_replace)
+
+    validate_dotenv_destinations(destination, ["FIRST", "SECOND"])
+    mutate_dotenv_many(destination, {"FIRST": "one", "SECOND": "two"})
+
+    assert destination.read_text() == "FIRST=one\nOTHER=keep\nSECOND=two\n"
+    assert replacements == 1
+
+
+def test_multi_preflight_rejects_one_populated_target(tmp_path: Path) -> None:
+    destination = tmp_path / "dotenv"
+    original = "FIRST=\nSECOND=old\n"
+    destination.write_text(original)
+
+    with pytest.raises(PopulatedVariableError):
+        validate_dotenv_destinations(destination, ["FIRST", "SECOND"])
+    with pytest.raises(PopulatedVariableError):
+        mutate_dotenv_many(destination, {"FIRST": "one", "SECOND": "two"})
+
+    assert destination.read_text() == original
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "FIRST=\nSECOND=one\nSECOND=two\n",
+        "FIRST=\nSECOND # malformed\n",
+    ],
+)
+def test_multi_force_still_rejects_duplicate_or_malformed_targets(
+    tmp_path: Path, source: str
+) -> None:
+    destination = tmp_path / "dotenv"
+    destination.write_text(source)
+
+    with pytest.raises(DotenvFormatError):
+        mutate_dotenv_many(destination, {"FIRST": "one", "SECOND": "two"}, force=True)
+
+    assert destination.read_text() == source
 
 
 def test_target_prefix_is_not_mistaken_for_assignment(tmp_path: Path) -> None:
@@ -189,7 +287,7 @@ def test_existing_destination_removes_group_and_world_bits(tmp_path: Path) -> No
     destination.write_text("TOKEN=old\n")
     destination.chmod(0o754)
 
-    mutate_dotenv(destination, "TOKEN", "value")
+    mutate_dotenv(destination, "TOKEN", "value", force=True)
 
     assert stat.S_IMODE(destination.stat().st_mode) == 0o700
 
@@ -235,7 +333,7 @@ def test_parent_symlink_retarget_cannot_redirect_write(
 
     monkeypatch.setattr(dotenv, "_create_temporary", retarget)
 
-    mutate_dotenv(alias / ".env", "TOKEN", "synthetic-canary")
+    mutate_dotenv(alias / ".env", "TOKEN", "synthetic-canary", force=True)
 
     assert (safe / ".env").read_text() == "TOKEN=synthetic-canary\n"
     assert (other / ".env").read_text() == "TOKEN=other\n"
@@ -261,7 +359,7 @@ def test_destination_replacement_during_mutation_fails_closed(
     monkeypatch.setattr(dotenv, "_create_temporary", replace_destination)
 
     with pytest.raises(UnsafeDotenvFileError):
-        mutate_dotenv(destination, "TOKEN", "synthetic-canary")
+        mutate_dotenv(destination, "TOKEN", "synthetic-canary", force=True)
 
     assert destination.read_text() == "TOKEN=attacker\n"
     assert not list(tmp_path.glob(".*.tmp"))
@@ -280,7 +378,7 @@ def test_atomic_failure_leaves_original_and_cleans_temporary_files(
     monkeypatch.setattr("ainv.dotenv.os.replace", fail_replace)
 
     with pytest.raises(Exception) as raised:
-        mutate_dotenv(destination, "TOKEN", "synthetic-canary")
+        mutate_dotenv(destination, "TOKEN", "synthetic-canary", force=True)
 
     assert "synthetic-canary" not in str(raised.value)
     assert destination.read_bytes() == original

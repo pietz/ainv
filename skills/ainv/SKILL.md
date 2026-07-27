@@ -1,132 +1,127 @@
 ---
 name: ainv
-description: Deliver credentials from existing providers to intended processes without exposing values in routine agent context. Use when a task needs a credential, authenticated command, dotenv file, macOS Keychain item, 1Password secret, or help with a missing credential.
+description: Deliver credentials from existing providers to intended processes without exposing values in routine agent context. Use when a task needs a credential, authenticated command, dotenv file, macOS Keychain item, or help with a missing credential.
 ---
 
 # ainv
 
-Keep credential values out of routine agent context, shell arguments, and
-`ainv`'s normal output. Child output can still expose them. Prefer an existing
-native login when one works; use `ainv` for macOS Keychain discovery, creation,
-and delivery. Treat `ainv --help` and `ainv <command> --help` as the syntax
+Use `ainv` for declaration-free Keychain discovery and credential delivery while
+keeping values out of routine agent context. Treat `ainv --help` as the syntax
 source of truth.
 
 ## Choose the least-exposing path
 
 1. Prefer native authenticated sessions such as `gh`, SSH agent, cloud workload
    identity, `pg_service.conf`/`.pgpass`, or a provider CLI.
-2. Prefer `ainv run` when a child process needs a Keychain value in its
-   environment.
-3. Use `ainv set` only when the consumer requires a dotenv file.
+2. Prefer `ainv run` when one trusted process needs environment variables.
+3. Use `ainv set` only when the consumer requires a physical dotenv file.
 
 `ainv` currently supports non-synchronizable generic passwords in the default
-macOS Keychain. It does not yet deliver 1Password credentials. For a 1Password
-credential, prefer existing native authentication or a documented mechanism
-that resolves the value outside agent-visible output. Never use `op read` as a
-workaround; pause and involve the user if no safe delivery path is available.
+legacy macOS Keychain only.
 
-## Keychain convention
+## Find and select
 
-When adding credentials, use the target environment-variable name as the
-Keychain service and an explicit scope such as `personal`, `workgenius`, or a
-client name as the account. Discovery returns an opaque persistent reference,
-which avoids ambiguous service-only retrieval. Treat it as a local Keychain
-locator, not portable project configuration or an immutable credential ID. If it
-stops resolving, search again rather than reconstructing it from metadata.
-
-## Find an existing credential
-
-Search metadata without retrieving secret values:
+Search metadata without retrieving values:
 
 ```console
 ainv find openai
 ainv find openai --json
 ```
 
-The human table abbreviates long references. Use `--json` when selecting a
-credential, and pass the exact complete reference from its structured output to
-the next command. Narrow broad queries rather than enumerating unrelated
-metadata.
+Prefer readable credential IDs returned by discovery:
+
+```text
+keychain:OPENAI_API_KEY@personal
+```
+
+Use service as the credential or destination name and account as an explicit
+scope such as `personal`, `work`, or a client name. Ask the user when multiple
+accounts or credentials are plausible. Never guess between personal, work,
+production, or client scopes.
+
+JSON also contains legacy opaque references. Treat either form as non-secret
+local metadata, not portable project configuration. Search again if an identity
+stops resolving.
 
 ## Add a missing credential
 
-Prepare the interactive command for the user:
+Prepare this command for the user:
 
 ```console
 ainv add OPENAI_API_KEY --provider keychain --account personal
 ```
 
-`--label` is optional. The user must run or complete this command in an
-interactive terminal and enter the value through its one hidden prompt. A human
-may safely paste a newly issued credential from a browser into that prompt.
-Agents must never read, inspect, or manipulate the clipboard. Never request a
-credential in chat, accept it as a command argument, or pipe it into `ainv`.
-The complete opaque reference in success output is labeled `Reference
-(non-secret identifier)`. It is usable for later `ainv` commands and is not the
-credential value.
+The user must enter the value through the hidden interactive prompt. Never ask
+for a credential in chat, accept it as an argument, pipe it into `ainv`, or
+read/manipulate the clipboard.
 
-## Keychain authorization dialogs
+## Inject into one trusted command
 
-With the current `uv tool` Python distribution, a Keychain dialog may identify
-`python3.13` rather than `ainv`; this is possible, not confirmed dialog wording.
-When a dialog appears, stop for the human to verify that the requested operation
-is expected. Instruct them to choose **Allow Once**, not **Always Allow**. Do
-not coach around, suppress, bypass, or alter Keychain prompts or access controls.
-`ainv find` is metadata-only and cannot prompt. Resolving a pre-existing item
-for `ainv set` or `ainv run` can prompt.
-
-The dialog authorizes the uv-managed Python interpreter rather than the `ainv`
-console script. An `ainv`-created item already trusts its creator interpreter,
-so Allow Once does not make this distribution a stable, least-privilege identity
-for unattended high-value credentials.
-
-## Inject into one command
-
-Prefer process injection when the consumer supports environment variables:
+Allow destination-name inference when the service is already the required,
+non-sensitive environment variable:
 
 ```console
-ainv run 'OPENAI_API_KEY=keychain://v1/item/REFERENCE' -- command
+ainv run keychain:OPENAI_API_KEY@personal -- command
 ```
 
-Use `ainv run` only for an intended, trusted consumer. Avoid debug or
-environment-dumping modes. The selected process, its descendants, dependencies,
-crash reporters, telemetry, and anything it invokes receive or can access the
-plaintext value and can retain, print, transmit, or expose it. These
-instructions are not an enforcement boundary: `ainv` does not make untrusted
-agents, repositories, dependencies, or commands safe.
-
-## Write one dotenv entry
+Otherwise bind it explicitly:
 
 ```console
-ainv set 'keychain://v1/item/REFERENCE' \
-  --as OPENAI_API_KEY --file .env
+ainv run API_KEY=keychain:OPENAI_API_KEY@personal -- command
 ```
 
-The destination contains plaintext after this operation. Do not read, display,
-grep, summarize, or otherwise inspect it afterward. `ainv` refuses unsafe Git
-destinations unless an explicit override is given; do not use an override
-without the user's informed approval.
+Execution-sensitive names such as `PATH`, language startup hooks, and dynamic
+loader variables require explicit `NAME=CREDENTIAL` bindings. Multiple
+bindings resolve before anything executes. Use only an intended, trusted
+consumer and avoid debug or environment-dumping modes. The process,
+its descendants, dependencies, telemetry, and anything it invokes can expose
+received values. This is hygiene, not containment.
 
-## Cleanup and exposure recovery
+## Set dotenv entries
 
-For private dogfood, a user can remove an `ainv`-created item manually in
-Keychain Access by its service, account, and label. A user may manually remove
-a materialized dotenv entry, but never ask an agent to read the dotenv file to
-do so. There is no `ainv replace` or `ainv remove` command.
+```console
+ainv set keychain:OPENAI_API_KEY@personal --file .env
+```
 
-If a credential is exposed, stop and have the user revoke or rotate it with the
-remote issuer first. Removing the local Keychain item does not revoke it
-remotely.
+Multiple bindings are atomic:
+
+```console
+ainv set \
+  keychain:OPENAI_API_KEY@personal \
+  DATABASE_URL=keychain:POSTGRES_URL@work \
+  --file .env
+```
+
+A missing variable is appended and a syntactically empty placeholder is filled.
+Comment-bearing assignments are conservatively treated as populated. A
+populated assignment fails before credential resolution. `--force` permits replacement,
+but use it only after the user explicitly agrees to replace the named existing
+assignments. It does not override Git or filesystem safety. Do not use
+`--allow-tracked` or `--allow-unignored` without informed user approval.
+
+The destination contains plaintext afterward. Never read, display, grep,
+summarize, or otherwise inspect it.
+
+## Keychain dialogs
+
+With the current Python distribution, a dialog may identify `python3.13` rather
+than `ainv`. Stop for the human to verify that the operation is expected and
+instruct them to choose **Allow Once**, not **Always Allow**. Never approve,
+suppress, bypass, or alter Keychain prompts. `find` is metadata-only and cannot
+prompt; `run` and `set` can prompt while resolving.
 
 ## Hard guardrails
 
-- There is intentionally no command that prints a resolved credential.
+- There is intentionally no generic plaintext retrieval command.
 - Never invoke provider-native plaintext retrieval as a workaround, including
-  standalone `security ... -w`, `gh auth token`, `op read`, access-token print
-  commands, `env`, or `printenv`.
-- Never place a secret in command arguments, chat, shell history, clipboard, or
-  agent-visible tool output.
+  `security ... -w`, `gh auth token`, `op read`, token-printing commands, `env`,
+  or `printenv`.
+- Never place a secret in arguments, chat, shell history, clipboard, or
+  agent-visible output.
 - Never read files whose purpose is holding credentials, including `.env`,
   `.pgpass`, agent auth files, and SSH private keys.
-- If a value appears in agent output or conversation context, stop, report the
-  exposure without repeating it, and tell the user to rotate it.
+- If a value appears in output or conversation context, stop without repeating
+  it and tell the user to revoke or rotate it.
+
+For cleanup, the user can remove Keychain items in Keychain Access and dotenv
+entries manually. Removing a local item does not revoke the remote credential.

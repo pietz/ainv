@@ -21,12 +21,14 @@ from ainv import __version__
 from ainv.dotenv import (
     DotenvError,
     InvalidSecretValueError,
-    mutate_dotenv,
-    validate_dotenv_destination,
+    mutate_dotenv_many,
+    validate_dotenv_destinations,
+    validate_variable_name,
 )
 from ainv.errors import (
     CredentialNotFoundError,
     InvalidCredentialMetadataError,
+    InvalidReferenceError,
     ProviderAccessDeniedError,
     ProviderError,
     ProviderLockedError,
@@ -40,21 +42,46 @@ from ainv.git import (
 )
 from ainv.models import CredentialMetadata, ProviderCapability, Secret
 from ainv.providers.base import CredentialCreator, CredentialProvider
-from ainv.providers.keychain import KeychainProvider, parse_persistent_reference
+from ainv.providers.keychain import KeychainProvider, parse_readable_reference
 from ainv.providers.registry import ProviderRegistry
 
 _PROVIDER_REGISTRY = ProviderRegistry()
 _PROVIDER_REGISTRY.register(
     "keychain",
     KeychainProvider,
-    reference_prefixes=("keychain://v1/item/",),
+    reference_prefixes=("keychain:",),
 )
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
+_EXECUTION_SENSITIVE_VARIABLES = frozenset(
+    {
+        "BASH_ENV",
+        "CDPATH",
+        "ENV",
+        "GCONV_PATH",
+        "HOME",
+        "IFS",
+        "JAVA_TOOL_OPTIONS",
+        "JDK_JAVA_OPTIONS",
+        "LD_AUDIT",
+        "LD_LIBRARY_PATH",
+        "LD_PRELOAD",
+        "NODE_OPTIONS",
+        "PATH",
+        "PERL5OPT",
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "RUBYOPT",
+        "SHELLOPTS",
+        "TMPDIR",
+        "_JAVA_OPTIONS",
+    }
+)
+_EXECUTION_SENSITIVE_PREFIXES = ("DYLD_",)
 
 app = typer.Typer(
     name="ainv",
-    help="Move secrets from credential providers without printing them.",
+    help="Deliver credentials from providers without printing their values.",
     invoke_without_command=True,
     no_args_is_help=False,
 )
@@ -87,7 +114,7 @@ def cli(
         ),
     ] = False,
 ) -> None:
-    """Move secrets from credential providers without printing them."""
+    """Deliver credentials from providers without printing their values."""
     ctx.ensure_object(dict)
     ctx.obj["no_input"] = no_input
     if ctx.invoked_subcommand is None:
@@ -229,21 +256,28 @@ def add_command(
         f"{_terminal_safe(metadata.provider)} for account "
         f"{_terminal_safe(metadata.account)}."
     )
-    typer.echo(
-        f"Reference (non-secret identifier): {_terminal_safe(metadata.reference)}"
-    )
+    typer.echo(f"Credential ID (non-secret): {_terminal_safe(metadata.credential_id)}")
 
 
 @app.command("set")
 def set_command(
     ctx: typer.Context,
-    reference: Annotated[str, typer.Argument(help="Canonical credential reference.")],
-    variable: Annotated[
-        str, typer.Option("--as", help="Destination environment-variable name.")
+    binding_arguments: Annotated[
+        list[str],
+        typer.Argument(help="Credential IDs, or NAME=CREDENTIAL bindings, to write."),
     ],
+    variable: Annotated[
+        str | None,
+        typer.Option(
+            "--as", help="Destination name for one legacy credential argument."
+        ),
+    ] = None,
     file: Annotated[
         Path, typer.Option("--file", help="Dotenv destination file.")
     ] = Path(".env"),
+    force: Annotated[
+        bool, typer.Option(help="Replace populated dotenv assignments.")
+    ] = False,
     allow_unignored: Annotated[
         bool, typer.Option(help="Allow an untracked destination not ignored by Git.")
     ] = False,
@@ -251,28 +285,35 @@ def set_command(
         bool, typer.Option(help="Allow writing plaintext into a Git-tracked file.")
     ] = False,
 ) -> None:
-    """Set one dotenv entry directly from a credential reference."""
+    """Set one or more dotenv entries without printing credential values."""
     if str(file) == "-":
         _fail("dotenv destination must be a regular file", 6)
+    bindings = _parse_set_bindings(binding_arguments, variable)
+    values: dict[str, str] = {}
     try:
-        validate_dotenv_destination(file, variable)
+        validate_dotenv_destinations(
+            file, [name for name, _reference in bindings], force=force
+        )
         git_status = destination_status(file)
         enforce_destination_policy(
             git_status,
             allow_tracked=allow_tracked,
             allow_unignored=allow_unignored,
         )
-        secret = _provider_for_reference(reference).resolve(
-            reference, no_input=_no_input(ctx)
-        )
-        value = _secret_text(secret, dotenv=True)
+        provider_bindings = [
+            (name, reference, _provider_for_reference(reference))
+            for name, reference in bindings
+        ]
+        for name, reference, provider in provider_bindings:
+            secret = provider.resolve(reference, no_input=_no_input(ctx))
+            values[name] = _secret_text(secret, dotenv=True)
         git_status = destination_status(file)
         enforce_destination_policy(
             git_status,
             allow_tracked=allow_tracked,
             allow_unignored=allow_unignored,
         )
-        mutate_dotenv(file, variable, value)
+        mutate_dotenv_many(file, values, force=force)
     except ProviderError as error:
         _fail_provider(error)
     except GitSafetyError as error:
@@ -287,18 +328,24 @@ def set_command(
             "Warning: destination contains plaintext credentials and is outside Git checks.",
             err=True,
         )
+    names = ", ".join(_terminal_safe(name) for name in values)
     typer.echo(
-        f"Set {_terminal_safe(variable)} in {_terminal_safe(str(file))} "
-        "from keychain (value hidden)."
+        f"Set {names} in {_terminal_safe(str(file))} from keychain (values hidden)."
     )
 
 
 @app.command(
     "run",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    epilog=(
+        "Place one or more CREDENTIAL or NAME=CREDENTIAL bindings before the "
+        "required -- delimiter. A bare readable ID infers its service as the "
+        "destination name. Examples: ainv run keychain:TOKEN@personal -- "
+        "command | ainv run API_KEY=keychain:TOKEN@personal -- command"
+    ),
 )
 def run_command(ctx: typer.Context) -> None:
-    """Inject referenced credentials into one child process."""
+    """Inject selected credentials into one child process."""
     bindings, command = _parse_run_arguments(ctx.args)
     environment = os.environ.copy()
     resolved: dict[str, str] = {}
@@ -328,42 +375,96 @@ def _get_provider(name: str) -> CredentialProvider:
 
 def _provider_for_reference(reference: str) -> CredentialProvider:
     provider_name = _PROVIDER_REGISTRY.provider_name_for_reference(reference)
-    if provider_name == "keychain":
-        parse_persistent_reference(reference)
     return _get_provider(provider_name)
+
+
+def _parse_set_bindings(
+    arguments: list[str], legacy_variable: str | None
+) -> list[tuple[str, str]]:
+    if not arguments:
+        _fail("set requires at least one credential", 2)
+    if legacy_variable is not None:
+        if len(arguments) != 1 or "=" in arguments[0]:
+            _fail("--as requires exactly one credential reference", 2)
+        return [_validated_binding(legacy_variable, arguments[0], set())]
+    return _parse_bindings(arguments)
 
 
 def _parse_run_arguments(
     arguments: list[str],
 ) -> tuple[list[tuple[str, str]], list[str]]:
-    bindings: list[tuple[str, str]] = []
-    seen: set[str] = set()
+    binding_arguments: list[str] = []
     command_index = 0
     for command_index, argument in enumerate(arguments):
-        if "=" not in argument:
-            break
-        variable, reference = argument.split("=", 1)
-        from ainv.dotenv import validate_variable_name
-
-        try:
-            validate_variable_name(variable)
-        except DotenvError as error:
-            _fail(str(error), 2)
-        if not reference:
-            _fail("credential reference must not be empty", 2)
-        if variable in seen:
-            _fail("duplicate destination environment variable", 2)
-        seen.add(variable)
-        bindings.append((variable, reference))
+        if "=" in argument or _looks_like_reference(argument):
+            binding_arguments.append(argument)
+            continue
+        break
     else:
         command_index = len(arguments)
 
     command = arguments[command_index:]
-    if not bindings:
-        _fail("run requires at least one NAME=REF binding", 2)
+    if not binding_arguments:
+        _fail("run requires at least one credential binding", 2)
     if not command:
         _fail("run requires a child command", 2)
-    return bindings, command
+    return _parse_bindings(binding_arguments), command
+
+
+def _parse_bindings(arguments: list[str]) -> list[tuple[str, str]]:
+    bindings: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for argument in arguments:
+        if "=" in argument:
+            variable, reference = argument.split("=", 1)
+        else:
+            reference = argument
+            variable = _infer_variable(reference)
+        bindings.append(_validated_binding(variable, reference, seen))
+    return bindings
+
+
+def _validated_binding(
+    variable: str, reference: str, seen: set[str]
+) -> tuple[str, str]:
+    try:
+        validate_variable_name(variable)
+    except DotenvError as error:
+        _fail(str(error), 2)
+    if not reference:
+        _fail("credential reference must not be empty", 2)
+    try:
+        _PROVIDER_REGISTRY.provider_name_for_reference(reference)
+    except ProviderError as error:
+        _fail_provider(error)
+    if variable in seen:
+        _fail("duplicate destination environment variable", 2)
+    seen.add(variable)
+    return variable, reference
+
+
+def _infer_variable(reference: str) -> str:
+    try:
+        provider_name = _PROVIDER_REGISTRY.provider_name_for_reference(reference)
+        if provider_name != "keychain":
+            raise ValueError
+        service, _account = parse_readable_reference(reference)
+        validate_variable_name(service)
+    except (ProviderError, DotenvError, ValueError):
+        _fail("credential requires an explicit NAME= binding", 2)
+    if service in _EXECUTION_SENSITIVE_VARIABLES or service.startswith(
+        _EXECUTION_SENSITIVE_PREFIXES
+    ):
+        _fail("execution-sensitive variable requires an explicit NAME= binding", 2)
+    return service
+
+
+def _looks_like_reference(value: str) -> bool:
+    try:
+        _PROVIDER_REGISTRY.provider_name_for_reference(value)
+    except ProviderError:
+        return False
+    return True
 
 
 def _prompt_new_secret() -> Secret:
@@ -459,7 +560,7 @@ def _table() -> Table:
 def _render_metadata_table(matches: list[CredentialMetadata]) -> None:
     console = _console()
     table = _table()
-    table.add_column("Reference", min_width=34, no_wrap=True)
+    table.add_column("Credential ID", min_width=34, no_wrap=True)
     table.add_column(
         "Provider", min_width=8, max_width=8, no_wrap=True, overflow="ellipsis"
     )
@@ -468,14 +569,21 @@ def _render_metadata_table(matches: list[CredentialMetadata]) -> None:
     table.add_column("Label", min_width=5, no_wrap=True, overflow="ellipsis")
     for item in matches:
         table.add_row(
-            Text(_abbreviate_reference(item.reference)),
+            Text(_abbreviate_reference(_terminal_safe(item.credential_id))),
             Text(_terminal_safe(item.provider)),
             Text(_terminal_safe(item.name)),
             Text(_terminal_safe(item.account)),
             Text(_terminal_safe(item.label)),
         )
     console.print(table)
-    console.print(Text("Use --json for complete references."), style="dim")
+    if any(
+        item.identifier is None or len(_terminal_safe(item.credential_id)) > 34
+        for item in matches
+    ):
+        console.print(
+            Text("Use --json for complete credential IDs and legacy references."),
+            style="dim",
+        )
 
 
 def _abbreviate_reference(reference: str) -> str:
@@ -489,6 +597,7 @@ def _abbreviate_reference(reference: str) -> str:
 
 def _metadata_json(metadata: CredentialMetadata) -> dict[str, str | None]:
     return {
+        "id": metadata.credential_id,
         "ref": metadata.reference,
         "provider": metadata.provider,
         "name": metadata.name,
@@ -522,7 +631,9 @@ def _no_input(ctx: typer.Context) -> bool:
 
 
 def _fail_provider(error: ProviderError, *, as_json: bool = False) -> Never:
-    if isinstance(error, CredentialNotFoundError):
+    if isinstance(error, InvalidReferenceError):
+        code = 2
+    elif isinstance(error, CredentialNotFoundError):
         code = 3
     elif isinstance(error, (ProviderUnavailableError, ProviderLockedError)):
         code = 4

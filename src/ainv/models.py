@@ -53,11 +53,17 @@ class CredentialMetadata:
     created_at: datetime | None = None
     item_type: str | None = None
     keychain: str | None = None
+    identifier: str | None = None
 
     @property
     def ref(self) -> str:
         """The JSON-facing spelling of :attr:`reference`."""
         return self.reference
+
+    @property
+    def credential_id(self) -> str:
+        """Return the preferred readable identifier, with a legacy fallback."""
+        return self.identifier or self.reference
 
 
 @dataclass(frozen=True, slots=True, repr=False)

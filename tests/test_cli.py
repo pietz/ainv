@@ -71,6 +71,7 @@ class FakeCreator(FakeProvider):
             label=label or service,
             kind="generic-password",
             modified_at=None,
+            identifier=f"keychain:{service}@{account}",
         )
 
 
@@ -78,6 +79,7 @@ def metadata(
     *,
     label: str = "Synthetic credential",
     reference: str = "keychain://v1/item/c3ludGhldGlj",
+    identifier: str = "keychain:OPENAI_API_KEY@personal",
 ) -> CredentialMetadata:
     return CredentialMetadata(
         reference=reference,
@@ -87,6 +89,7 @@ def metadata(
         label=label,
         kind="generic-password",
         modified_at=None,
+        identifier=identifier,
     )
 
 
@@ -98,14 +101,14 @@ def test_version() -> None:
     result = runner.invoke(app, ["--version"])
 
     assert result.exit_code == 0
-    assert result.stdout == "ainv 0.1.2\n"
+    assert result.stdout == "ainv 0.2.0\n"
 
 
 def test_no_args_shows_help() -> None:
     result = runner.invoke(app)
 
     assert result.exit_code == 0
-    assert "Move secrets from credential providers" in result.stdout
+    assert "Deliver credentials from providers" in result.stdout
 
 
 def test_providers_renders_rounded_table(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -131,50 +134,84 @@ def test_find_json_returns_complete_metadata_only(
 
     assert result.exit_code == 0
     document = json.loads(result.stdout)
-    assert document["schema_version"] == 1
+    assert document["schema_version"] == 2
     assert document["matches"][0]["name"] == "OPENAI_API_KEY"
+    assert document["matches"][0]["id"] == "keychain:OPENAI_API_KEY@personal"
     assert document["matches"][0]["ref"] == reference
     assert CANARY not in result.stdout
 
 
-def test_find_renders_clean_table_with_abbreviated_reference(
+def test_find_renders_readable_credential_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    reference = "keychain://v1/item/" + "a" * 48 + "tailend8"
-    install_provider(monkeypatch, FakeProvider([metadata(reference=reference)]))
+    install_provider(monkeypatch, FakeProvider([metadata()]))
 
     result = runner.invoke(app, ["find", "openai"])
 
     assert result.exit_code == 0
     assert "╭" in result.stdout
     assert "╰" in result.stdout
-    assert "Reference" in result.stdout
+    assert "Credential ID" in result.stdout
     assert "Provider" in result.stdout
-    assert "keychain://v1/item/aaaa...tailend8" in result.stdout
-    assert reference not in result.stdout
-    assert "Use --json for complete references." in result.stdout
+    assert "keychain:OPENAI_API_KEY@personal" in result.stdout
+    assert "Use --json" not in result.stdout
 
 
-def test_find_keeps_short_reference_complete(monkeypatch: pytest.MonkeyPatch) -> None:
-    item = metadata()
+def test_find_abbreviates_legacy_reference_and_points_to_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reference = "keychain://v1/item/" + "a" * 48 + "tailend8"
+    item = metadata(reference=reference)
+    item = CredentialMetadata(
+        reference=item.reference,
+        provider=item.provider,
+        name=item.name,
+        account=item.account,
+        label=item.label,
+        kind=item.kind,
+        modified_at=item.modified_at,
+    )
     install_provider(monkeypatch, FakeProvider([item]))
 
     result = runner.invoke(app, ["find", "openai"])
 
     assert result.exit_code == 0
-    assert item.reference in result.stdout
+    assert "keychain://v1/item/aaaa...tailend8" in result.stdout
+    assert reference not in result.stdout
+    assert (
+        "Use --json for complete credential IDs and legacy references." in result.stdout
+    )
+
+
+def test_find_abbreviates_long_readable_id_with_recovery_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identifier = "keychain:OPENAI_API_KEY@" + "account-" * 8
+    install_provider(monkeypatch, FakeProvider([metadata(identifier=identifier)]))
+
+    result = runner.invoke(app, ["find", "openai"])
+
+    assert result.exit_code == 0
+    assert identifier not in result.stdout
+    assert "..." in result.stdout
+    assert (
+        "Use --json for complete credential IDs and legacy references." in result.stdout
+    )
 
 
 def test_find_sanitizes_terminal_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     install_provider(
         monkeypatch,
-        FakeProvider([metadata(label="[b]\n\x1b")]),
+        FakeProvider(
+            [metadata(label="[b]\n\x1b", identifier="keychain:TOKEN@bad\n\x1b")]
+        ),
     )
 
     result = runner.invoke(app, ["find", "openai"])
 
     assert result.exit_code == 0
     assert "[b]\\n" in result.stdout
+    assert "bad\\n\\x1b" in result.stdout
     assert "\x1b" not in result.stdout
 
 
@@ -219,8 +256,7 @@ def test_add_uses_hidden_secret_and_outputs_metadata_only(
     assert result.exit_code == 0
     assert provider.created_secret == CANARY.encode()
     assert (
-        "Reference (non-secret identifier): keychain://v1/item/bmV3LWl0ZW0"
-        in result.stdout
+        "Credential ID (non-secret): keychain:OPENAI_API_KEY@personal" in result.stdout
     )
     assert CANARY not in result.stdout
     assert CANARY not in result.stderr
@@ -621,3 +657,254 @@ def test_run_injects_without_rendering_secret(
         "args": ["example-command"],
         "value": CANARY,
     }
+
+
+def test_run_infers_variable_from_readable_credential_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_provider(monkeypatch, FakeProvider([metadata()]))
+    captured: dict[str, str] = {}
+
+    def fake_exec(file: str, args: list[str], env: dict[str, str]) -> None:
+        captured["value"] = env["OPENAI_API_KEY"]
+        raise RuntimeError("exec intercepted")
+
+    monkeypatch.setattr(os, "execvpe", fake_exec)
+
+    with pytest.raises(RuntimeError, match="exec intercepted"):
+        runner.invoke(
+            app,
+            [
+                "run",
+                "keychain:OPENAI_API_KEY@personal",
+                "--",
+                "example-command",
+            ],
+            catch_exceptions=False,
+        )
+
+    assert captured == {"value": CANARY}
+
+
+@pytest.mark.parametrize("variable", ["PATH", "NODE_OPTIONS", "DYLD_INSERT_LIBRARIES"])
+def test_inference_refuses_execution_sensitive_variables(
+    variable: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_provider(monkeypatch, FakeProvider([metadata()]))
+
+    result = runner.invoke(
+        app,
+        ["run", f"keychain:{variable}@personal", "--", "example-command"],
+    )
+
+    assert result.exit_code == 2
+    assert "execution-sensitive variable requires an explicit NAME=" in result.stderr
+    assert CANARY not in result.stdout
+    assert CANARY not in result.stderr
+
+
+def test_duplicate_inferred_names_fail_before_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MustNotResolve(FakeProvider):
+        def resolve(self, reference: str, *, no_input: bool = False) -> Secret:
+            raise AssertionError("duplicate bindings must fail before resolution")
+
+    install_provider(monkeypatch, MustNotResolve([metadata()]))
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "keychain:TOKEN@personal",
+            "keychain:TOKEN@work",
+            "--",
+            "example-command",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "duplicate destination environment variable" in result.stderr
+
+
+def test_run_resolves_all_bindings_before_starting_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailsSecond(FakeProvider):
+        calls = 0
+
+        def resolve(self, reference: str, *, no_input: bool = False) -> Secret:
+            self.calls += 1
+            if self.calls == 2:
+                from ainv.errors import CredentialNotFoundError
+
+                raise CredentialNotFoundError()
+            return Secret(CANARY.encode())
+
+    provider = FailsSecond([metadata()])
+    install_provider(monkeypatch, provider)
+
+    def must_not_exec(file: str, args: list[str], env: dict[str, str]) -> None:
+        raise AssertionError("command must not start after partial resolution")
+
+    monkeypatch.setattr(os, "execvpe", must_not_exec)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "FIRST=keychain:FIRST@personal",
+            "SECOND=keychain:SECOND@personal",
+            "--",
+            "example-command",
+        ],
+    )
+
+    assert result.exit_code == 3
+    assert provider.calls == 2
+    assert CANARY not in result.stdout
+    assert CANARY not in result.stderr
+
+
+def test_set_infers_names_and_writes_multiple_bindings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text(".env\n")
+
+    class MappingProvider(FakeProvider):
+        def resolve(self, reference: str, *, no_input: bool = False) -> Secret:
+            return Secret(b"first" if ":FIRST@" in reference else b"second")
+
+    install_provider(monkeypatch, MappingProvider([metadata()]))
+    destination = tmp_path / ".env"
+
+    result = runner.invoke(
+        app,
+        [
+            "set",
+            "keychain:FIRST@personal",
+            "SECOND_VALUE=keychain:SECOND@personal",
+            "--file",
+            str(destination),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert destination.read_text() == "FIRST=first\nSECOND_VALUE=second\n"
+    assert "Set FIRST, SECOND_VALUE" in result.stdout
+    assert "first" not in result.stdout
+    assert "second" not in result.stdout
+
+
+def test_set_does_not_write_when_later_binding_cannot_be_materialized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text(".env\n")
+    destination = tmp_path / ".env"
+    original = "FIRST=\nSECOND=\n"
+    destination.write_text(original)
+
+    class InvalidSecond(FakeProvider):
+        def resolve(self, reference: str, *, no_input: bool = False) -> Secret:
+            return Secret(b"valid" if ":FIRST@" in reference else b"invalid\nvalue")
+
+    install_provider(monkeypatch, InvalidSecond([metadata()]))
+
+    result = runner.invoke(
+        app,
+        [
+            "set",
+            "keychain:FIRST@personal",
+            "keychain:SECOND@personal",
+            "--file",
+            str(destination),
+        ],
+    )
+
+    assert result.exit_code == 7
+    assert destination.read_text() == original
+    assert "valid" not in result.stdout
+    assert "invalid" not in result.stdout
+    assert "invalid" not in result.stderr
+
+
+def test_set_rechecks_populated_assignment_after_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text(".env\n")
+    destination = tmp_path / ".env"
+    destination.write_text("TOKEN=\n")
+
+    class PopulatesDuringResolution(FakeProvider):
+        def resolve(self, reference: str, *, no_input: bool = False) -> Secret:
+            destination.write_text("TOKEN=attacker\n")
+            return Secret(CANARY.encode())
+
+    install_provider(monkeypatch, PopulatesDuringResolution([metadata()]))
+
+    result = runner.invoke(
+        app,
+        [
+            "set",
+            "keychain:TOKEN@personal",
+            "--file",
+            str(destination),
+        ],
+    )
+
+    assert result.exit_code == 6
+    assert "already has a value" in result.stderr
+    assert destination.read_text() == "TOKEN=attacker\n"
+    assert CANARY not in result.stdout
+    assert CANARY not in result.stderr
+
+
+def test_set_refuses_populated_value_before_resolution_and_force_replaces_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text(".env\n")
+    destination = tmp_path / ".env"
+    destination.write_text("TOKEN=old\n")
+
+    class CountsResolution(FakeProvider):
+        calls = 0
+
+        def resolve(self, reference: str, *, no_input: bool = False) -> Secret:
+            self.calls += 1
+            return super().resolve(reference, no_input=no_input)
+
+    provider = CountsResolution([metadata()])
+    install_provider(monkeypatch, provider)
+    arguments = [
+        "set",
+        "TOKEN=keychain:TOKEN@personal",
+        "--file",
+        str(destination),
+    ]
+
+    refused = runner.invoke(app, arguments)
+
+    assert refused.exit_code == 6
+    assert "already has a value" in refused.stderr
+    assert provider.calls == 0
+    assert destination.read_text() == "TOKEN=old\n"
+
+    replaced = runner.invoke(app, [*arguments, "--force"])
+
+    assert replaced.exit_code == 0
+    assert provider.calls == 1
+    assert destination.read_text() == f"TOKEN={CANARY}\n"
+    assert CANARY not in replaced.stdout
+    assert CANARY not in replaced.stderr

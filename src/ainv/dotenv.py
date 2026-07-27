@@ -11,7 +11,7 @@ import codecs
 import os
 import re
 import stat
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from secrets import token_hex
@@ -55,6 +55,10 @@ class UnsafeDotenvFileError(DotenvError):
     """The destination is not a safe regular file to replace."""
 
 
+class PopulatedVariableError(DotenvError):
+    """A target assignment already contains a value."""
+
+
 def validate_variable_name(name: str) -> None:
     """Validate an environment variable name without accepting prefixes."""
     if not isinstance(name, str) or _NAME.fullmatch(name) is None:
@@ -87,34 +91,54 @@ def encode_value(value: str) -> str:
     return value
 
 
-def validate_dotenv_destination(path: Pathish, name: str) -> None:
-    """Validate a destination before resolving a credential.
+def validate_dotenv_destination(
+    path: Pathish, name: str, *, force: bool = False
+) -> None:
+    """Validate one destination before resolving a credential."""
+    validate_dotenv_destinations(path, [name], force=force)
 
-    The destination is checked again during mutation because another process
-    may change it between validation and delivery.
-    """
-    validate_variable_name(name)
+
+def validate_dotenv_destinations(
+    path: Pathish, names: Sequence[str], *, force: bool = False
+) -> None:
+    """Validate all targets before resolving any credentials."""
+    if not names:
+        raise DotenvError("at least one dotenv variable is required")
+    if len(set(names)) != len(names):
+        raise DotenvError("duplicate destination environment variable")
+    for name in names:
+        validate_variable_name(name)
     parent, leaf = _destination_parts(path)
     with _directory_lock(parent) as directory_fd:
         contents, _file_stat = _read_destination(directory_fd, leaf)
-        _validate_document(contents, name)
+        for name in names:
+            _validate_target(contents, name, force=force)
 
 
-def mutate_dotenv(path: Pathish, name: str, value: str) -> None:
-    """Atomically insert or replace ``name`` in a dotenv file.
+def mutate_dotenv(path: Pathish, name: str, value: str, *, force: bool = False) -> None:
+    """Atomically insert or replace one dotenv assignment."""
+    mutate_dotenv_many(path, {name: value}, force=force)
 
-    Only regular, single-link files are accepted.  The destination directory is
-    advisory-locked for the complete read-modify-replace operation, which
-    serializes cooperating ``ainv`` writers even though a replacement changes
-    the destination inode.
-    """
-    validate_variable_name(name)
-    encoded_value = encode_value(value)  # Validate before opening the file.
+
+def mutate_dotenv_many(
+    path: Pathish, values: Mapping[str, str], *, force: bool = False
+) -> None:
+    """Atomically insert or replace multiple dotenv assignments once."""
+    if not values:
+        raise DotenvError("at least one dotenv variable is required")
+    encoded: dict[str, str] = {}
+    for name, value in values.items():
+        validate_variable_name(name)
+        encoded[name] = encode_value(value)
     parent, leaf = _destination_parts(path)
 
     with _directory_lock(parent) as directory_fd:
         original, original_stat = _read_destination(directory_fd, leaf)
-        replacement = _mutated_bytes(original, name, encoded_value)
+        for name in encoded:
+            _validate_target(original, name, force=force)
+        replacement = original
+        for name, value in encoded.items():
+            replacement = _mutated_bytes(replacement, name, value)
         _atomic_replace(directory_fd, leaf, replacement, original_stat)
 
 
@@ -226,6 +250,22 @@ def _mutated_bytes(contents: bytes, name: str, encoded_value: str) -> bytes:
         raise DotenvFormatError(
             "dotenv destination cannot be encoded as UTF-8"
         ) from None
+
+
+def _validate_target(contents: bytes, name: str, *, force: bool) -> None:
+    matches = _validate_document(contents, name)
+    if not matches or force:
+        return
+    text, _bom = _decode_dotenv(contents)
+    line = text.splitlines(keepends=True)[matches[0]]
+    body, _ending = _split_line_ending(line)
+    assignment = _ASSIGNMENT.fullmatch(body)
+    if assignment is None:
+        raise DotenvFormatError("target assignment is malformed")
+    if assignment.group("value").strip() not in {"", '""', "''"}:
+        raise PopulatedVariableError(
+            "dotenv variable already has a value; pass --force to replace it"
+        )
 
 
 def _validate_document(contents: bytes, name: str) -> list[int]:

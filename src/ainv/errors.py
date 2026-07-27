@@ -19,7 +19,7 @@ class ProviderError(Exception):
 class InvalidReferenceError(ProviderError, ValueError):
     """A reference is not a canonical reference understood by the provider."""
 
-    message = "credential reference is invalid or unsupported"
+    message = "credential ID or reference is invalid or unsupported"
 
 
 class CredentialNotFoundError(ProviderError):
@@ -43,7 +43,7 @@ class InvalidCredentialMetadataError(ProviderError, ValueError):
 class CredentialAmbiguousError(ProviderError):
     """A supposedly exact native lookup did not identify one item."""
 
-    message = "credential reference did not identify exactly one item"
+    message = "credential ID or reference did not identify exactly one item"
 
 
 class ProviderUnavailableError(ProviderError):

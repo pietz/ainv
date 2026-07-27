@@ -25,8 +25,8 @@ def test_synthetic_persistent_reference_round_trip(tmp_path: Path) -> None:
     import Security
 
     keychain_password = b"ainv-test-keychain-password"
-    service = "AINV_SYNTHETIC_SERVICE"
-    account = "ainv-synthetic-account"
+    service = "AINV SYNTHETIC@SERVICE"
+    account = "ainv-synthetic/account"
     value = b"ainv-synthetic-value"
     keychain_path = os.fsencode(tmp_path / "synthetic.keychain-db")
 
@@ -53,13 +53,18 @@ def test_synthetic_persistent_reference_round_trip(tmp_path: Path) -> None:
             secret=Secret(value),
             no_input=True,
         )
-        matches = provider.search("AINV_SYNTHETIC_SERVICE")
+        matches = provider.search("AINV SYNTHETIC")
 
         assert len(matches) == 1
         assert created.reference == matches[0].reference
-        assert matches[0].name == "AINV_SYNTHETIC_SERVICE"
+        assert matches[0].name == service
+        assert matches[0].identifier == (
+            "keychain:AINV%20SYNTHETIC%40SERVICE@ainv-synthetic%2Faccount"
+        )
         resolved = provider.resolve(matches[0].reference, no_input=True)
         assert resolved.reveal() == value
+        readable_resolved = provider.resolve(matches[0].credential_id, no_input=True)
+        assert readable_resolved.reveal() == value
     finally:
         Security.SecKeychainDelete(keychain)
 

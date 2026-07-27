@@ -1,137 +1,144 @@
 # ainv
 
-`ainv` combines AI and environment. It is an agent-first credential delivery
-layer: agents select opaque references; intended processes receive credential
-values.
+`ainv` is a small, agent-operated credential handoff utility for macOS:
 
-> Give AI agents the environment they need, not the secrets behind it.
->
-> This describes the intended normal workflow, not an enforcement guarantee
-> against malicious agents, repositories, dependencies, or child processes.
+> Give agents the environment they need, not the secrets behind it.
 
-It is a small, provider-neutral CLI for humans and shell-capable coding agents
-that need to:
+An agent can discover Keychain credentials through value-free metadata, ask a
+human to resolve ambiguity or enter a missing value, and deliver the credential
+to one trusted process or a conventional dotenv file without returning the
+value through `ainv`'s normal interface.
 
-- add credentials to an existing provider through hidden human input;
-- search credential stores using non-sensitive metadata;
-- write a selected credential directly into an environment file; and
-- inject selected credentials into one child process.
-
-`ainv` is not a secret manager, vault, daemon, cloud service, or MCP server.
-Credential providers remain the source of truth. Its main benefit is context
-hygiene: resolved values stay out of routine model context, shell arguments, and
-`ainv`'s normal output, but child output can still expose them.
+No project manifest, custom vault, cloud service, daemon, or MCP server is
+required. The macOS Keychain remains the source of truth.
 
 > [!IMPORTANT]
-> This project is an early development preview. The current release supports
-> non-synchronizable generic passwords in the default macOS Keychain only.
+> `ainv` provides context hygiene and reduces accidental exposure. It does not
+> contain a malicious agent or process. A selected process can expose injected
+> values, and an agent or process with file access can read materialized dotenv
+> values.
 
-The proposed product and security contract is documented in
-[SPEC.md](https://github.com/pietz/ainv/blob/main/SPEC.md).
+The current preview supports non-synchronizable generic passwords in the
+default legacy macOS Keychain only.
 
 ## Installation
 
 > [!WARNING]
-> Version 0.1.2 is a pre-alpha evaluation release. In the current `uv tool`
-> distribution, macOS Keychain trusts the uv-managed Python interpreter, not the
-> `ainv` command. Do not treat it as a stable, least-privilege identity for
-> unattended high-value credentials. See
-> [SECURITY.md](https://github.com/pietz/ainv/blob/main/SECURITY.md) before
-> choosing Keychain approval.
-
-Install the published package with:
+> Version 0.2.0 remains pre-alpha. In the current `uv tool` distribution,
+> Keychain authorizes the uv-managed Python interpreter rather than a stable,
+> signed `ainv` executable. Read [SECURITY.md](SECURITY.md) before approving
+> Keychain access.
 
 ```console
 uv tool install ainv
 ```
 
-For development from a local checkout:
+For development from a checkout:
 
 ```console
 uv tool install .
 ```
 
-## Usage
+## Discover a credential
 
-Add a native Keychain credential through one hidden input prompt:
-
-```console
-ainv add OPENAI_API_KEY --provider keychain --account personal
-```
-
-`--label` is optional. Existing credentials are never overwritten. A human may
-paste a newly issued credential from a browser into the hidden prompt. Agents
-must never read, inspect, or manipulate the clipboard. On success, the full
-opaque reference is labeled `Reference (non-secret identifier)` so it is not
-mistaken for a credential value.
-
-Search Keychain metadata without retrieving secret values:
+Search metadata without retrieving secret values:
 
 ```console
 ainv find openai
 ainv find openai --json
 ```
 
-The human-readable table abbreviates long references for readability. Use
-`--json` when you need the complete opaque reference for another command.
+Results prefer readable, value-free credential IDs:
 
-Use the complete opaque reference returned by `find --json` to set one dotenv
-entry:
-
-```console
-ainv set 'keychain://v1/item/REFERENCE' --as OPENAI_API_KEY --file .env
+```text
+keychain:OPENAI_API_KEY@personal
 ```
 
-Or inject it into one child process without touching disk:
+Service or account characters outside the safe identifier set are
+percent-encoded. JSON also includes the legacy opaque persistent reference for
+compatibility and rare disambiguation.
+
+## Add a missing credential
 
 ```console
-ainv run 'OPENAI_API_KEY=keychain://v1/item/REFERENCE' -- command
+ainv add OPENAI_API_KEY --provider keychain --account personal
 ```
 
-`set` refuses tracked or non-ignored Git destinations unless explicitly
-overridden. Run `ainv <command> --help` for all options.
+`--label` is optional. The human enters the value through one fail-closed hidden
+TTY prompt. Values are never accepted through arguments, pipes, or chat, and
+existing credentials are never overwritten.
 
-> [!WARNING]
-> `ainv run` keeps resolved values out of its normal arguments and output, but
-> it gives them to the selected process. That process, its descendants,
-> dependencies, crash reporters, telemetry, and anything it invokes can read,
-> retain, transmit, or expose them. Use it only for an intended, trusted
-> consumer and avoid debug or environment-dumping modes. This is guidance, not
-> an enforcement boundary: `ainv` does not make untrusted agents, repositories,
-> dependencies, or commands safe.
+## Inject credentials into one process
 
-The command surface will not include a generic operation that prints a resolved
-secret.
-
-## References and cleanup
-
-A Keychain reference is an opaque local locator, not portable project
-configuration or a unique identifier for one immutable credential incarnation.
-It may become stale after identity metadata changes or deletion. If it no
-longer resolves, search again rather than reconstructing it from metadata.
-
-For private dogfood, remove an `ainv`-created Keychain item manually in Keychain
-Access by its service, account, and label. Remove a materialized dotenv entry
-manually without asking an agent to read the file. If a credential is exposed,
-revoke or rotate it with its remote issuer first. Removing the local Keychain
-item does not revoke it remotely.
-
-## Agent skill
-
-The repository includes an optional agent skill at
-[`skills/ainv`](https://github.com/pietz/ainv/tree/main/skills/ainv). Install it
-into the canonical shared skills directory with:
+When the Keychain service is a valid, non-sensitive environment-variable name,
+`ainv` infers the destination:
 
 ```console
-mkdir -p ~/.agents/skills
-ditto skills/ainv ~/.agents/skills/ainv
+ainv run keychain:OPENAI_API_KEY@personal -- command
 ```
 
-Claude Code additionally needs a discovery symlink:
+An explicit destination and multiple all-or-nothing bindings are also
+supported:
 
 ```console
-ln -s ~/.agents/skills/ainv ~/.claude/skills/ainv
+ainv run \
+  API_KEY=keychain:OPENAI_API_KEY@personal \
+  keychain:DATABASE_URL@work \
+  -- command
 ```
+
+Execution-sensitive names such as `PATH`, language startup hooks, and dynamic
+loader variables require an explicit `NAME=CREDENTIAL` binding. Every
+credential resolves before the command starts. The selected process and its
+descendants receive plaintext values and are trusted recipients. Child stdout
+and stderr pass through unchanged.
+
+## Set dotenv entries
+
+Use `set` only when the consumer requires a physical dotenv file:
+
+```console
+ainv set keychain:OPENAI_API_KEY@personal --file .env
+```
+
+Multiple bindings are committed in one atomic replacement:
+
+```console
+ainv set \
+  keychain:OPENAI_API_KEY@personal \
+  DATABASE_URL=keychain:POSTGRES_URL@work \
+  --file .env
+```
+
+Default behavior is deliberately conservative:
+
+- create a missing file with restricted permissions;
+- append an absent assignment at the bottom;
+- fill `NAME=`, `NAME =`, `NAME=""`, or `NAME=''` placeholders;
+- conservatively treat comment-bearing assignments as populated;
+- refuse duplicate or populated assignments before resolving credentials;
+- refuse tracked or non-ignored Git destinations unless explicitly approved;
+- preserve unrelated content and replace the file atomically.
+
+Replacing a populated assignment requires informed approval:
+
+```console
+ainv set keychain:OPENAI_API_KEY@personal --file .env --force
+```
+
+`--force` does not bypass Git, ownership, symlink, hard-link, or permission
+protections. Legacy `ainv set REF --as NAME` syntax remains supported.
+
+## Deliberate omissions
+
+There is no generic `get`, `print`, clipboard, export, shell-session, vault,
+manifest, provider plugin system, or MCP command. Existing native sessions such
+as SSH agents, cloud CLIs, and provider authentication remain preferable when
+they already solve the task.
+
+For recurring schema-driven project environments, consider a declarative tool
+such as Varlock. `ainv` focuses on ad hoc agent work, initial onboarding, and
+safe conventional dotenv materialization.
 
 ## Development
 
@@ -144,14 +151,7 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-## Security model
-
-`ainv` reduces accidental credential exposure by keeping resolved values out of
-its normal arguments and output. Once a secret is written to a file or injected
-into a child process, it can be read, retained, printed, transmitted, or exposed
-by that process, its descendants, dependencies, crash reporters, telemetry, or
-anything it invokes. Child stdout and stderr pass through unchanged. `ainv`
-does not make untrusted agents, repositories, dependencies, or commands safe.
+The detailed product and security contract is in [SPEC.md](SPEC.md).
 
 ## License
 

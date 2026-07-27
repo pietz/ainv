@@ -7,6 +7,7 @@ import pytest
 
 from ainv.errors import (
     CredentialAlreadyExistsError,
+    CredentialAmbiguousError,
     CredentialNotFoundError,
     InvalidCredentialMetadataError,
     InvalidReferenceError,
@@ -19,7 +20,9 @@ from ainv.providers.keychain import (
     KeychainConstants,
     KeychainProvider,
     format_persistent_reference,
+    format_readable_reference,
     parse_persistent_reference,
+    parse_readable_reference,
 )
 
 
@@ -162,6 +165,7 @@ def test_create_targets_default_keychain_and_returns_reference() -> None:
     assert metadata.name == "OPENAI_API_KEY"
     assert metadata.account == "personal"
     assert metadata.label == "OPENAI_API_KEY"
+    assert metadata.identifier == "keychain:OPENAI_API_KEY@personal"
     assert parse_persistent_reference(metadata.reference) == b"new-persistent-reference"
     attributes = backend.added_items[0]
     assert attributes["class"] == "generic-password"
@@ -222,12 +226,74 @@ def test_resolution_uses_exact_persistent_reference_and_no_input_fails_ui() -> N
     assert "resolution-canary" not in repr(secret)
 
 
+def test_readable_reference_round_trip_is_canonical_and_percent_encoded() -> None:
+    reference = format_readable_reference("API KEY@client", "wörk/account")
+
+    assert reference == "keychain:API%20KEY%40client@w%C3%B6rk%2Faccount"
+    assert parse_readable_reference(reference) == ("API KEY@client", "wörk/account")
+
+    for invalid in (
+        "keychain:SERVICE",
+        "keychain:@account",
+        "keychain:service@",
+        "keychain:service@one@two",
+        "keychain:service%2fpart@account",
+        "KEYCHAIN:service@account",
+    ):
+        with pytest.raises(InvalidReferenceError):
+            parse_readable_reference(invalid)
+
+
+def test_resolution_of_readable_id_uses_metadata_only_exact_lookup() -> None:
+    backend = FakeBackend([(0, b"opaque-item"), (0, b"resolution-canary")])
+
+    secret = KeychainProvider(backend).resolve(
+        "keychain:OPENAI_API_KEY@personal", no_input=True
+    )
+
+    assert secret.reveal() == b"resolution-canary"
+    assert backend.queries[0] == {
+        "class": "generic-password",
+        "synchronizable": False,
+        "search-list": ["fake-default-keychain"],
+        "service": "OPENAI_API_KEY",
+        "account": "personal",
+        "return-persistent-ref": True,
+        "match-limit": "all",
+        "authentication-ui": "fail",
+    }
+    assert "return-data" not in backend.queries[0]
+    assert backend.queries[1]["persistent-ref"] == b"opaque-item"
+    assert backend.queries[1]["return-data"] is True
+
+
+def test_readable_id_fails_closed_when_exact_lookup_is_ambiguous() -> None:
+    backend = FakeBackend([(0, [b"one", b"two"])])
+
+    with pytest.raises(CredentialAmbiguousError, match="exactly one"):
+        KeychainProvider(backend).resolve("keychain:SERVICE@account")
+
+    assert len(backend.queries) == 1
+    assert "return-data" not in backend.queries[0]
+
+
 def test_resolution_allows_native_authentication_only_when_input_is_allowed() -> None:
     backend = FakeBackend([(0, b"value")])
 
     KeychainProvider(backend).resolve(format_persistent_reference(b"item"))
 
     assert backend.queries[0]["authentication-ui"] == "allow"
+
+
+def test_readable_lookup_stays_metadata_only_before_interactive_resolution() -> None:
+    backend = FakeBackend([(0, b"item"), (0, b"value")])
+
+    KeychainProvider(backend).resolve("keychain:SERVICE@account")
+
+    assert backend.queries[0]["authentication-ui"] == "fail"
+    assert "return-data" not in backend.queries[0]
+    assert backend.queries[1]["authentication-ui"] == "allow"
+    assert backend.queries[1]["return-data"] is True
 
 
 @pytest.mark.parametrize(

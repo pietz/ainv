@@ -53,7 +53,7 @@ class ProviderRegistry:
         return factory()
 
     def provider_name_for_reference(self, reference: str) -> str:
-        """Route an opaque reference by its registered canonical prefix."""
+        """Route a credential identity by its registered canonical prefix."""
         matches = [
             name
             for prefix, name in self._prefixes.items()

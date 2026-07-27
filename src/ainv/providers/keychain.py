@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 from unicodedata import normalize
+from urllib.parse import quote, unquote_to_bytes
 
 from ainv.errors import (
     CredentialAlreadyExistsError,
@@ -35,7 +36,9 @@ from ainv.models import (
     Secret,
 )
 
+_PROVIDER_PREFIX = "keychain:"
 _REFERENCE_PREFIX = "keychain://v1/item/"
+_READABLE_SAFE = "-._~"
 
 # Values are stable OSStatus constants from Security/SecBase.h.  Keeping them
 # here avoids exposing native error text, which can contain provider details.
@@ -291,11 +294,43 @@ class KeychainProvider:
             kind="generic-password",
             modified_at=None,
             keychain="default",
+            identifier=format_readable_reference(service, account),
         )
 
     def resolve(self, reference: str, *, no_input: bool = False) -> Secret:
-        """Resolve by persistent reference only, never service/account fallback."""
-        persistent_ref = parse_persistent_reference(reference)
+        """Resolve one exact persistent or readable Keychain reference."""
+        if reference.startswith(_REFERENCE_PREFIX):
+            persistent_ref = parse_persistent_reference(reference)
+        else:
+            service, account = parse_readable_reference(reference)
+            persistent_ref = self._persistent_reference_for(service, account)
+        return self._resolve_persistent_reference(persistent_ref, no_input=no_input)
+
+    def _persistent_reference_for(self, service: str, account: str) -> bytes:
+        """Resolve readable identity metadata to exactly one opaque locator."""
+        backend = self._get_backend()
+        keychain = self._default_keychain(backend)
+        constants = backend.constants
+        native_query: dict[object, object] = {
+            constants.item_class: constants.generic_password,
+            constants.synchronizable: False,
+            constants.match_search_list: [keychain],
+            constants.attr_service: service,
+            constants.attr_account: account,
+            constants.return_persistent_ref: True,
+            constants.match_limit: constants.match_limit_all,
+            constants.use_authentication_ui: constants.authentication_ui_fail,
+        }
+        status, result = backend.copy_matching(native_query)
+        self._raise_for_status(status)
+        persistent_ref = _exact_data_result(result)
+        if persistent_ref is None:
+            raise CredentialAmbiguousError()
+        return persistent_ref
+
+    def _resolve_persistent_reference(
+        self, persistent_ref: bytes, *, no_input: bool
+    ) -> Secret:
         backend = self._get_backend()
         keychain = self._default_keychain(backend)
         constants = backend.constants
@@ -315,15 +350,9 @@ class KeychainProvider:
         status, result = backend.copy_matching(native_query)
         self._raise_for_status(status)
 
-        # SecItemCopyMatching with MatchLimitOne must return one bytes value.
-        # Treat every other shape as a closed failure rather than guessing.
-        if isinstance(result, (list, tuple)):
-            if len(result) != 1:
-                raise CredentialAmbiguousError()
-            result = result[0]
-        secret_data = _data_bytes(result)
+        secret_data = _exact_data_result(result)
         if secret_data is None:
-            raise ProviderOperationError()
+            raise CredentialAmbiguousError()
         return Secret(secret_data)
 
     def _get_backend(self) -> KeychainBackend:
@@ -370,11 +399,13 @@ class KeychainProvider:
             # An item without a stable persistent reference cannot safely be
             # selected later, so it is not a discovery result.
             return None
+        service = _string_attribute(attributes, constants.attr_service)
+        account = _string_attribute(attributes, constants.attr_account)
         return CredentialMetadata(
             reference=format_persistent_reference(persistent_ref),
             provider="keychain",
-            name=_string_attribute(attributes, constants.attr_service),
-            account=_string_attribute(attributes, constants.attr_account),
+            name=service,
+            account=account,
             label=_string_attribute(attributes, constants.attr_label),
             kind="generic-password",
             modified_at=_date_attribute(attributes, constants.attr_modification_date),
@@ -382,6 +413,11 @@ class KeychainProvider:
             created_at=_date_attribute(attributes, constants.attr_creation_date),
             item_type=_string_attribute(attributes, constants.attr_type),
             keychain="default",
+            identifier=(
+                format_readable_reference(service, account)
+                if service and account
+                else None
+            ),
         )
 
 
@@ -393,6 +429,44 @@ def _creation_metadata(value: str) -> str:
     ):
         raise InvalidCredentialMetadataError()
     return value
+
+
+def format_readable_reference(service: str, account: str) -> str:
+    """Format one canonical, readable service/account Keychain identity."""
+    if not isinstance(service, str) or not service:
+        raise InvalidReferenceError()
+    if not isinstance(account, str) or not account:
+        raise InvalidReferenceError()
+    return (
+        _PROVIDER_PREFIX
+        + quote(service, safe=_READABLE_SAFE)
+        + "@"
+        + quote(account, safe=_READABLE_SAFE)
+    )
+
+
+def parse_readable_reference(reference: str) -> tuple[str, str]:
+    """Parse only canonical ``keychain:SERVICE@ACCOUNT`` identities."""
+    if (
+        not isinstance(reference, str)
+        or not reference.startswith(_PROVIDER_PREFIX)
+        or reference.startswith(_REFERENCE_PREFIX)
+    ):
+        raise InvalidReferenceError()
+    identity = reference[len(_PROVIDER_PREFIX) :]
+    if identity.count("@") != 1:
+        raise InvalidReferenceError()
+    service_token, account_token = identity.split("@", 1)
+    if not service_token or not account_token:
+        raise InvalidReferenceError()
+    try:
+        service = unquote_to_bytes(service_token).decode("utf-8", "strict")
+        account = unquote_to_bytes(account_token).decode("utf-8", "strict")
+    except (UnicodeDecodeError, ValueError):
+        raise InvalidReferenceError() from None
+    if format_readable_reference(service, account) != reference:
+        raise InvalidReferenceError()
+    return service, account
 
 
 def format_persistent_reference(persistent_ref: bytes) -> str:
@@ -430,6 +504,18 @@ def _data_bytes(value: object | None) -> bytes | None:
         return memoryview(value).tobytes()  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+
+
+def _exact_data_result(result: object | None) -> bytes | None:
+    """Return one data result while rejecting zero or multiple matches."""
+    direct = _data_bytes(result)
+    if direct is not None:
+        return direct
+    if not isinstance(result, Sequence) or isinstance(result, str):
+        return None
+    if len(result) != 1:
+        return None
+    return _data_bytes(result[0])
 
 
 def _attribute_results(result: object | None) -> list[Mapping[object, object]]:
