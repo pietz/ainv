@@ -25,6 +25,21 @@ agents, repositories, dependencies, or commands safe. Use `ainv run` only for
 an intended, trusted consumer and avoid debug or environment-dumping modes;
 this guidance is not an enforcement boundary.
 
+## Optional human-consent popup
+
+When `approval = "always"`, `ainv run` and `ainv set` display one native AppKit
+dialog after destination validation and before secret resolution. The dialog
+contains only credential metadata and delivery context. Denial prevents
+Keychain resolution and delivery. `--no-input`, invalid configuration, and an
+unavailable graphical session fail closed.
+
+This is an oversight and accidental-use control, not an authorization boundary.
+A shell-capable process running as the user can edit the configuration, bypass
+`ainv`, invoke provider-native tools, or potentially automate ordinary UI when
+it has Accessibility privileges. The Python-hosted dialog is also not a stable,
+signed application identity. A hard permission boundary would require a signed
+native broker that owns both approval and delivery.
+
 ## Current macOS Keychain authorization limitation
 
 In the current `uv tool` Python distribution, macOS Keychain authorizes the
@@ -48,7 +63,7 @@ identify `python3.13` rather than `ainv`; exact dialog wording has not been
 observed. `ainv find` is metadata-only and cannot prompt, while secret
 resolution for `ainv set` or `ainv run` can prompt.
 
-Version 0.2.0 remains a pre-alpha evaluation release. Do not use the current
+Version 0.3.0 remains a pre-alpha evaluation release. Do not use the current
 Python distribution as a stable, least-privilege Keychain identity for
 unattended high-value credentials. A stable Developer ID-signed native identity
 is required before a stable release.

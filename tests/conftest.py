@@ -6,6 +6,8 @@ import os
 
 import pytest
 
+from ainv.config import Config
+
 
 @pytest.fixture(autouse=True)
 def forbid_real_keychain_access(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -22,3 +24,9 @@ def forbid_real_keychain_access(monkeypatch: pytest.MonkeyPatch) -> None:
         "ainv.providers.keychain.PyObjCSecurityBackend.__init__",
         forbidden,
     )
+    monkeypatch.setattr("ainv.cli._get_config", lambda: Config())
+
+    def forbid_approval_popup(*args: object, **kwargs: object) -> None:
+        raise AssertionError("native approval popups are forbidden in tests")
+
+    monkeypatch.setattr("ainv.cli._get_approver", forbid_approval_popup)

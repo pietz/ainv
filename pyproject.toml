@@ -1,6 +1,6 @@
 [project]
 name = "ainv"
-version = "0.2.0"
+version = "0.3.0"
 description = "Agent-operated credential handoff from existing providers"
 readme = "README.md"
 authors = [
@@ -16,6 +16,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "pyobjc-framework-cocoa>=11 ; sys_platform == 'darwin'",
     "pyobjc-framework-security>=11 ; sys_platform == 'darwin'",
     "rich>=13",
     "typer>=0.16",

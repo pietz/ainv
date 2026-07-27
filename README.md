@@ -24,7 +24,7 @@ default legacy macOS Keychain only.
 ## Installation
 
 > [!WARNING]
-> Version 0.2.0 remains pre-alpha. In the current `uv tool` distribution,
+> Version 0.3.0 remains pre-alpha. In the current `uv tool` distribution,
 > Keychain authorizes the uv-managed Python interpreter rather than a stable,
 > signed `ainv` executable. Read [SECURITY.md](SECURITY.md) before approving
 > Keychain access.
@@ -128,6 +128,41 @@ ainv set keychain:OPENAI_API_KEY@personal --file .env --force
 
 `--force` does not bypass Git, ownership, symlink, hard-link, or permission
 protections. Legacy `ainv set REF --as NAME` syntax remains supported.
+
+## Optional approval popup
+
+Require one native macOS consent dialog before every `run` or `set` delivery:
+
+```console
+ainv config --approval always
+```
+
+Turn it off or inspect the current setting:
+
+```console
+ainv config --approval off
+ainv config
+```
+
+Test the popup without accessing any credential:
+
+```console
+ainv config --test-popup
+```
+
+The dialog shows value-free credential IDs, destination variables, the target
+command or file, and working directory. It offers **Deny** and **Allow Once**.
+One dialog covers up to ten bindings in an invocation and appears after
+destination validation but before any credential resolution. Review context is escaped and
+must fit completely in the dialog; it is never silently truncated. When
+approval is enabled, `--no-input` fails closed instead of displaying UI.
+
+Configuration lives at
+`~/Library/Application Support/ainv/config.toml`. This popup adds human
+oversight and reduces unnoticed use. It is not a hard permission boundary: a
+shell-capable process running as the same user can edit configuration, bypass
+`ainv`, or invoke provider-native tools. Keychain may show its own separate
+system authorization dialog after ainv approval.
 
 ## Deliberate omissions
 

@@ -469,6 +469,14 @@ def parse_readable_reference(reference: str) -> tuple[str, str]:
     return service, account
 
 
+def validate_keychain_reference(reference: str) -> None:
+    """Validate either supported Keychain identity without accessing Keychain."""
+    if reference.startswith(_REFERENCE_PREFIX):
+        parse_persistent_reference(reference)
+    else:
+        parse_readable_reference(reference)
+
+
 def format_persistent_reference(persistent_ref: bytes) -> str:
     """Encode native persistent-reference bytes in the canonical MVP URI."""
     if not isinstance(persistent_ref, bytes) or not persistent_ref:

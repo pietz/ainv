@@ -102,6 +102,26 @@ assignments. It does not override Git or filesystem safety. Do not use
 The destination contains plaintext afterward. Never read, display, grep,
 summarize, or otherwise inspect it.
 
+## ainv approval dialogs
+
+When approval is configured as `always`, `run` and `set` show one native macOS
+dialog before resolving any credential. Stop and let the human review the
+credential IDs, destination variables, command or file, and working directory.
+Never click, automate, suppress, or bypass this dialog. Continue only when the
+human selects **Allow Once**. Denial ends the operation.
+
+Inspect or change the setting with:
+
+```console
+ainv config
+ainv config --approval always
+ainv config --approval off
+```
+
+`ainv config --test-popup` tests the UI without accessing credentials. This
+consent gate provides human oversight, not containment against a shell-capable
+agent running as the same user.
+
 ## Keychain dialogs
 
 With the current Python distribution, a dialog may identify `python3.13` rather

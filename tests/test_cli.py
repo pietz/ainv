@@ -16,7 +16,9 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from ainv.approval import ApprovalRequest, DeliveryAction
 from ainv.cli import _prompt_new_secret, app
+from ainv.config import ApprovalMode, Config, ConfigurationError
 from ainv.models import (
     CredentialMetadata,
     ProviderCapability,
@@ -47,6 +49,16 @@ class FakeProvider:
 
     def resolve(self, reference: str, *, no_input: bool = False) -> Secret:
         return Secret(self.value)
+
+
+@dataclass
+class FakeApprover:
+    allowed: bool
+    requests: list[ApprovalRequest]
+
+    def approve(self, request: ApprovalRequest) -> bool:
+        self.requests.append(request)
+        return self.allowed
 
 
 class FakeCreator(FakeProvider):
@@ -101,7 +113,7 @@ def test_version() -> None:
     result = runner.invoke(app, ["--version"])
 
     assert result.exit_code == 0
-    assert result.stdout == "ainv 0.2.0\n"
+    assert result.stdout == "ainv 0.3.0\n"
 
 
 def test_no_args_shows_help() -> None:
@@ -109,6 +121,43 @@ def test_no_args_shows_help() -> None:
 
     assert result.exit_code == 0
     assert "Deliver credentials from providers" in result.stdout
+
+
+def test_config_command_updates_and_displays_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved: list[Config] = []
+    monkeypatch.setattr(
+        "ainv.cli.save_config", lambda config, path: saved.append(config)
+    )
+    monkeypatch.setattr(
+        "ainv.cli.load_config", lambda path: saved[-1] if saved else Config()
+    )
+    monkeypatch.setattr("ainv.cli.config_path", lambda: Path("/tmp/ainv-config"))
+
+    result = runner.invoke(app, ["config", "--approval", "always"])
+
+    assert result.exit_code == 0
+    assert saved == [Config(approval=ApprovalMode.ALWAYS)]
+    assert "Approval: always" in result.stdout
+    assert "Config: /tmp/ainv-config" in result.stdout
+
+
+def test_config_popup_test_never_accesses_a_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    approver = FakeApprover(allowed=True, requests=[])
+    monkeypatch.setattr("ainv.cli.load_config", lambda path: Config())
+    monkeypatch.setattr("ainv.cli.config_path", lambda: Path("/tmp/ainv-config"))
+    monkeypatch.setattr("ainv.cli._get_approver", lambda: approver)
+
+    result = runner.invoke(app, ["config", "--test-popup"])
+
+    assert result.exit_code == 0
+    assert "Approval popup result: allowed." in result.stdout
+    assert len(approver.requests) == 1
+    assert approver.requests[0].action is DeliveryAction.TEST
+    assert approver.requests[0].bindings == ()
 
 
 def test_providers_renders_rounded_table(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -908,3 +957,183 @@ def test_set_refuses_populated_value_before_resolution_and_force_replaces_it(
     assert destination.read_text() == f"TOKEN={CANARY}\n"
     assert CANARY not in replaced.stdout
     assert CANARY not in replaced.stderr
+
+
+def test_run_approval_denial_happens_once_before_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MustNotResolve(FakeProvider):
+        def resolve(self, reference: str, *, no_input: bool = False) -> Secret:
+            raise AssertionError("denied delivery must not resolve credentials")
+
+    approver = FakeApprover(allowed=False, requests=[])
+    install_provider(monkeypatch, MustNotResolve([metadata()]))
+    monkeypatch.setattr(
+        "ainv.cli._get_config", lambda: Config(approval=ApprovalMode.ALWAYS)
+    )
+    monkeypatch.setattr("ainv.cli._get_approver", lambda: approver)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "keychain:FIRST@personal",
+            "SECOND=keychain:SECOND@work",
+            "--",
+            "example-command",
+            "--flag",
+        ],
+    )
+
+    assert result.exit_code == 5
+    assert "credential delivery was denied" in result.stderr
+    assert len(approver.requests) == 1
+    request = approver.requests[0]
+    assert request.action is DeliveryAction.RUN
+    assert request.destination == "example-command --flag"
+    assert [(item.variable, item.credential) for item in request.bindings] == [
+        ("FIRST", "keychain:FIRST@personal"),
+        ("SECOND", "keychain:SECOND@work"),
+    ]
+    assert CANARY not in result.stdout
+    assert CANARY not in result.stderr
+
+
+def test_run_approval_allows_resolution_and_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    approver = FakeApprover(allowed=True, requests=[])
+    install_provider(monkeypatch, FakeProvider([metadata()]))
+    monkeypatch.setattr(
+        "ainv.cli._get_config", lambda: Config(approval=ApprovalMode.ALWAYS)
+    )
+    monkeypatch.setattr("ainv.cli._get_approver", lambda: approver)
+    captured: dict[str, str] = {}
+
+    def fake_exec(file: str, args: list[str], env: dict[str, str]) -> None:
+        captured["value"] = env["TOKEN"]
+        raise RuntimeError("exec intercepted")
+
+    monkeypatch.setattr(os, "execvpe", fake_exec)
+
+    with pytest.raises(RuntimeError, match="exec intercepted"):
+        runner.invoke(
+            app,
+            ["run", "keychain:TOKEN@personal", "--", "example-command"],
+            catch_exceptions=False,
+        )
+
+    assert len(approver.requests) == 1
+    assert captured == {"value": CANARY}
+
+
+def test_set_approval_denial_preserves_file_and_skips_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text(".env\n")
+    destination = tmp_path / ".env"
+    destination.write_text("TOKEN=\n")
+
+    class MustNotResolve(FakeProvider):
+        def resolve(self, reference: str, *, no_input: bool = False) -> Secret:
+            raise AssertionError("denied delivery must not resolve credentials")
+
+    approver = FakeApprover(allowed=False, requests=[])
+    install_provider(monkeypatch, MustNotResolve([metadata()]))
+    monkeypatch.setattr(
+        "ainv.cli._get_config", lambda: Config(approval=ApprovalMode.ALWAYS)
+    )
+    monkeypatch.setattr("ainv.cli._get_approver", lambda: approver)
+
+    result = runner.invoke(
+        app,
+        ["set", "keychain:TOKEN@personal", "--file", str(destination)],
+    )
+
+    assert result.exit_code == 5
+    assert destination.read_text() == "TOKEN=\n"
+    assert len(approver.requests) == 1
+    request = approver.requests[0]
+    assert request.action is DeliveryAction.SET
+    assert request.destination == str(destination.absolute())
+
+
+def test_no_input_fails_before_native_approval_or_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_provider(monkeypatch, FakeProvider([metadata()]))
+    monkeypatch.setattr(
+        "ainv.cli._get_config", lambda: Config(approval=ApprovalMode.ALWAYS)
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "--no-input",
+            "run",
+            "keychain:TOKEN@personal",
+            "--",
+            "example-command",
+        ],
+    )
+
+    assert result.exit_code == 5
+    assert "approval requires interactive input" in result.stderr
+
+
+def test_approval_refuses_more_bindings_than_can_be_displayed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_provider(monkeypatch, FakeProvider([metadata()]))
+    monkeypatch.setattr(
+        "ainv.cli._get_config", lambda: Config(approval=ApprovalMode.ALWAYS)
+    )
+    bindings = [f"TOKEN_{index}=keychain:TOKEN_{index}@personal" for index in range(11)]
+
+    result = runner.invoke(app, ["run", *bindings, "--", "example-command"])
+
+    assert result.exit_code == 5
+    assert "too many credentials for native approval" in result.stderr
+
+
+def test_invalid_reference_fails_before_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    approver = FakeApprover(allowed=True, requests=[])
+    install_provider(monkeypatch, FakeProvider([metadata()]))
+    monkeypatch.setattr(
+        "ainv.cli._get_config", lambda: Config(approval=ApprovalMode.ALWAYS)
+    )
+    monkeypatch.setattr("ainv.cli._get_approver", lambda: approver)
+
+    result = runner.invoke(
+        app,
+        ["run", "TOKEN=keychain:not-a-valid-id", "--", "example-command"],
+    )
+
+    assert result.exit_code == 2
+    assert approver.requests == []
+
+
+def test_invalid_approval_config_fails_delivery_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_provider(monkeypatch, FakeProvider([metadata()]))
+
+    def invalid_config() -> Config:
+        raise ConfigurationError("synthetic invalid configuration")
+
+    monkeypatch.setattr("ainv.cli._get_config", invalid_config)
+
+    result = runner.invoke(
+        app,
+        ["run", "keychain:TOKEN@personal", "--", "example-command"],
+    )
+
+    assert result.exit_code == 5
+    assert "synthetic invalid configuration" in result.stderr
+    assert CANARY not in result.stdout
+    assert CANARY not in result.stderr

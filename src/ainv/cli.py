@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 import termios
 import unicodedata
@@ -18,6 +19,24 @@ from rich.table import Table
 from rich.text import Text
 
 from ainv import __version__
+from ainv.approval import (
+    MAX_APPROVAL_BINDINGS,
+    ApprovalBinding,
+    ApprovalRequest,
+    ApprovalUnavailableError,
+    Approver,
+    DeliveryAction,
+    MacOSApprover,
+    test_request,
+)
+from ainv.config import (
+    ApprovalMode,
+    Config,
+    ConfigurationError,
+    config_path,
+    load_config,
+    save_config,
+)
 from ainv.dotenv import (
     DotenvError,
     InvalidSecretValueError,
@@ -42,7 +61,11 @@ from ainv.git import (
 )
 from ainv.models import CredentialMetadata, ProviderCapability, Secret
 from ainv.providers.base import CredentialCreator, CredentialProvider
-from ainv.providers.keychain import KeychainProvider, parse_readable_reference
+from ainv.providers.keychain import (
+    KeychainProvider,
+    parse_readable_reference,
+    validate_keychain_reference,
+)
 from ainv.providers.registry import ProviderRegistry
 
 _PROVIDER_REGISTRY = ProviderRegistry()
@@ -119,6 +142,41 @@ def cli(
     ctx.obj["no_input"] = no_input
     if ctx.invoked_subcommand is None:
         typer.echo(ctx.get_help())
+
+
+@app.command("config")
+def config_command(
+    ctx: typer.Context,
+    approval: Annotated[
+        ApprovalMode | None,
+        typer.Option(help="Set delivery approval behavior."),
+    ] = None,
+    test_popup: Annotated[
+        bool,
+        typer.Option("--test-popup", help="Show a harmless approval test."),
+    ] = False,
+) -> None:
+    """Show or update human-consent configuration."""
+    try:
+        configuration_path = config_path()
+        if approval is not None:
+            save_config(Config(approval=approval), configuration_path)
+        current = load_config(configuration_path)
+    except ConfigurationError as error:
+        _fail(str(error), 1)
+
+    typer.echo(f"Approval: {current.approval.value}")
+    typer.echo(f"Config: {_terminal_safe(str(configuration_path))}")
+    if not test_popup:
+        return
+    if _no_input(ctx):
+        _fail("approval popup requires interactive input", 5)
+    try:
+        allowed = _get_approver().approve(test_request())
+    except ApprovalUnavailableError as error:
+        _fail(str(error), 5)
+    result = "allowed" if allowed else "denied"
+    typer.echo(f"Approval popup result: {result}.")
 
 
 @app.command("providers")
@@ -300,6 +358,12 @@ def set_command(
             allow_tracked=allow_tracked,
             allow_unignored=allow_unignored,
         )
+        _request_approval(
+            ctx,
+            action=DeliveryAction.SET,
+            bindings=bindings,
+            destination=_approval_file_destination(file),
+        )
         provider_bindings = [
             (name, reference, _provider_for_reference(reference))
             for name, reference in bindings
@@ -347,6 +411,12 @@ def set_command(
 def run_command(ctx: typer.Context) -> None:
     """Inject selected credentials into one child process."""
     bindings, command = _parse_run_arguments(ctx.args)
+    _request_approval(
+        ctx,
+        action=DeliveryAction.RUN,
+        bindings=bindings,
+        destination=shlex.join(command),
+    )
     environment = os.environ.copy()
     resolved: dict[str, str] = {}
     try:
@@ -369,8 +439,61 @@ def run_command(ctx: typer.Context) -> None:
         _fail("could not start child command", 1)
 
 
+def _approval_file_destination(file: Path) -> str:
+    try:
+        return str(file.parent.resolve(strict=True) / file.name)
+    except OSError:
+        _fail("could not resolve dotenv destination directory", 6)
+
+
 def _get_provider(name: str) -> CredentialProvider:
     return _PROVIDER_REGISTRY.get(name)
+
+
+def _get_config() -> Config:
+    return load_config()
+
+
+def _get_approver() -> Approver:
+    return MacOSApprover()
+
+
+def _request_approval(
+    ctx: typer.Context,
+    *,
+    action: DeliveryAction,
+    bindings: list[tuple[str, str]],
+    destination: str,
+) -> None:
+    try:
+        configuration = _get_config()
+    except ConfigurationError as error:
+        _fail(str(error), 5)
+    if configuration.approval is ApprovalMode.OFF:
+        return
+    if len(bindings) > MAX_APPROVAL_BINDINGS:
+        _fail("too many credentials for native approval", 5)
+    if _no_input(ctx):
+        _fail("credential delivery approval requires interactive input", 5)
+    try:
+        working_directory = os.getcwd()
+    except OSError:
+        _fail("could not determine working directory for approval", 5)
+    request = ApprovalRequest(
+        action=action,
+        bindings=tuple(
+            ApprovalBinding(credential=reference, variable=variable)
+            for variable, reference in bindings
+        ),
+        destination=destination,
+        working_directory=working_directory,
+    )
+    try:
+        allowed = _get_approver().approve(request)
+    except ApprovalUnavailableError as error:
+        _fail(str(error), 5)
+    if not allowed:
+        _fail("credential delivery was denied", 5)
 
 
 def _provider_for_reference(reference: str) -> CredentialProvider:
@@ -434,7 +557,9 @@ def _validated_binding(
     if not reference:
         _fail("credential reference must not be empty", 2)
     try:
-        _PROVIDER_REGISTRY.provider_name_for_reference(reference)
+        provider_name = _PROVIDER_REGISTRY.provider_name_for_reference(reference)
+        if provider_name == "keychain":
+            validate_keychain_reference(reference)
     except ProviderError as error:
         _fail_provider(error)
     if variable in seen:

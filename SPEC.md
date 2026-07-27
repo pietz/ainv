@@ -1,6 +1,6 @@
 # ainv specification
 
-Status: Draft 0.2.0 pre-alpha
+Status: Draft 0.3.0 pre-alpha
 
 Target: Narrow public dogfood release with a hard validation threshold
 
@@ -41,6 +41,9 @@ storage nor encryption.
    exfiltration by a process that receives or can read a secret.
 8. **Small trusted core.** The project does not implement a vault, cryptography,
    cloud service, daemon, or synchronization system.
+9. **Optional human oversight.** A user may require one value-free native
+   consent dialog before each delivery. This is an accidental-use control, not
+   containment against a shell-capable process.
 
 ## 3. Non-goals
 
@@ -287,6 +290,33 @@ keychain  ready   built-in
 
 Machine-readable output is available through `--json`.
 
+### 5.6 Configure human approval
+
+```console
+ainv config --approval always
+ainv config --approval off
+ainv config
+ainv config --test-popup
+```
+
+Configuration is stored at
+`~/Library/Application Support/ainv/config.toml`. `off` is the default. In
+`always` mode, `run` and `set` display one AppKit dialog after destination
+validation and before provider resolution. One dialog covers up to ten bindings
+and shows credential IDs, destination variables, target command or file, and
+working directory without secret values. Control characters and Unicode line
+separators are escaped. Context that cannot be displayed completely within
+strict bounds fails closed rather than being truncated. The only decisions are
+**Deny** and **Allow Once**. Denial starts no command, resolves no credential,
+and mutates no file.
+
+`--no-input`, malformed or unsafe configuration, and unavailable graphical UI
+fail closed. `--test-popup` exercises only the dialog and accesses no provider.
+The configuration file and its directory reject unsafe ownership, links, and
+write permissions; writes are atomic. This improves human oversight but is not
+a hard boundary because a same-user shell process can edit configuration or
+bypass `ainv` entirely.
+
 ## 6. CLI contract
 
 Initial command surface:
@@ -297,6 +327,7 @@ ainv [--no-input] add SERVICE --provider NAME --account ACCOUNT [--label LABEL]
 ainv [--no-input] set [NAME=]CREDENTIAL... [--file PATH] [--force] [--allow-unignored] [--allow-tracked]
 ainv [--no-input] run [NAME=]CREDENTIAL... [--] COMMAND [ARG ...]
 ainv providers [--json]
+ainv config [--approval off|always] [--test-popup]
 ainv --help
 ainv --version
 ```
@@ -326,8 +357,8 @@ agent instructions.
   Typer/Click usage errors occur before command execution and retain their
   normal human-readable form in the MVP.
 - Prompts are forbidden in `--json` mode.
-- Global `--no-input` fails rather than triggering the hidden `add` prompt or
-  provider-controlled authentication/approval UI. `ainv` never reads secret
+- Global `--no-input` fails rather than triggering the hidden `add` prompt,
+  `ainv` consent UI, or provider-controlled authentication/approval UI. `ainv` never reads secret
   values from stdin. A piped or non-TTY stdin does not implicitly disable native
   Keychain approval UI because coding-agent subprocesses commonly lack a TTY;
   automation that forbids UI must pass `--no-input` explicitly.
@@ -422,7 +453,7 @@ Every provider declares explicit capabilities. The common operations are:
 4. Optional `create`: Store one new credential through secure human input.
 
 The internal registry maps provider names and credential prefixes to trusted
-factories. Version 0.2.0 ships only the Keychain provider and loads no third-party
+factories. Version 0.3.0 ships only the Keychain provider and loads no third-party
 code. `ainv` owns no credential storage and does not update, delete, rotate, or
 synchronize credentials.
 
@@ -454,7 +485,7 @@ disables it and fails closed.
 
 ##### Current distribution authorization limitation
 
-Version 0.2.0 remains a pre-alpha evaluation release. In the current `uv tool`
+Version 0.3.0 remains a pre-alpha evaluation release. In the current `uv tool`
 Python distribution, Keychain authorizes the uv-managed Python
 interpreter executable, not the `ainv` console script or terminal. An
 `ainv`-created generic-password item receives the interpreter's default creator
@@ -563,6 +594,8 @@ Metadata-only discovery must not access secret data at all.
 - another process with sufficient user privileges inspecting memory or files;
 - a malicious or compromised provider adapter;
 - provider-native tools being invoked directly by an agent;
+- a same-user process editing approval configuration or bypassing `ainv`;
+- ordinary approval UI being automated by a process with Accessibility access;
 - disclosure through application logs after delivery;
 - metadata disclosure through search output;
 - operating-system compromise.
@@ -587,6 +620,8 @@ outside the initial scope.
 
 Resolution and mutation should fail closed.
 
+- Do not resolve credentials, create or modify the destination, or start a
+  child command when configured human approval is denied or unavailable.
 - Do not create or modify the destination when provider resolution fails.
 - Do not start a child command unless all bindings resolve successfully.
 - Delete temporary files after any pre-rename failure.
@@ -696,7 +731,8 @@ Those demonstrations prevent accidental overclaiming.
 
 ### Phase 5: Narrow product validation
 
-- Dogfood readable discovery and delivery across ad hoc tasks.
+- Dogfood readable discovery, optional native approval, and delivery across ad
+  hoc tasks.
 - Validate repeated external use before adding destinations or providers.
 - Keep shell sessions, MCP, manifests, policy engines, and provider plugins out
   of scope.
@@ -730,4 +766,5 @@ The following should be resolved through prototypes rather than speculation:
    in addition to explicit flags.
 3. Minimum supported macOS version.
 4. Package license and public author identity.
-5. Whether repeated usage justifies a stable signed native identity.
+5. Whether repeated usage justifies moving approval and delivery into a stable,
+   signed native broker.
