@@ -38,7 +38,9 @@ class FakeProvider:
     capabilities = frozenset({ProviderCapability.SEARCH, ProviderCapability.RESOLVE})
 
     def status(self) -> ProviderStatus:
-        return ProviderStatus("keychain", ProviderState.READY)
+        return ProviderStatus(
+            "keychain", ProviderState.READY, capabilities=self.capabilities
+        )
 
     def search(self, query: str, *, limit: int = 20) -> list[CredentialMetadata]:
         return self.matches[:limit]
@@ -106,6 +108,19 @@ def test_no_args_shows_help() -> None:
     assert "Move secrets from credential providers" in result.stdout
 
 
+def test_providers_renders_rounded_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    install_provider(monkeypatch, FakeCreator([]))
+
+    result = runner.invoke(app, ["providers"])
+
+    assert result.exit_code == 0
+    assert "╭" in result.stdout
+    assert "╰" in result.stdout
+    assert "Provider" in result.stdout
+    assert "Status" in result.stdout
+    assert "create, resolve, search" in result.stdout
+
+
 def test_find_json_returns_complete_metadata_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -131,8 +146,10 @@ def test_find_renders_clean_table_with_abbreviated_reference(
     result = runner.invoke(app, ["find", "openai"])
 
     assert result.exit_code == 0
-    assert "REFERENCE" in result.stdout
-    assert "PROVIDER" in result.stdout
+    assert "╭" in result.stdout
+    assert "╰" in result.stdout
+    assert "Reference" in result.stdout
+    assert "Provider" in result.stdout
     assert "keychain://v1/item/aaaa...tailend8" in result.stdout
     assert reference not in result.stdout
     assert "Use --json for complete references." in result.stdout

@@ -123,17 +123,26 @@ def providers_command(
             )
         )
         return
-    typer.echo("PROVIDER  STATUS  SOURCE  CAPABILITIES")
+    console = _console()
+    table = _table()
+    table.add_column("Provider", no_wrap=True, overflow="ellipsis")
+    table.add_column("Status", no_wrap=True, overflow="ellipsis")
+    table.add_column("Source", no_wrap=True, overflow="ellipsis")
+    table.add_column("Capabilities", no_wrap=True, overflow="ellipsis")
     for status in statuses:
-        capabilities = ",".join(
+        capabilities = ", ".join(
             sorted(capability.value for capability in status.capabilities)
         )
-        typer.echo(
-            f"{_terminal_safe(status.provider)}  "
-            f"{_terminal_safe(status.state.value)}  "
-            f"{_terminal_safe(status.source)}  "
-            f"{_terminal_safe(capabilities)}"
+        state = Text(_terminal_safe(status.state.value))
+        if status.state.value == "ready":
+            state.stylize("green")
+        table.add_row(
+            Text(_terminal_safe(status.provider)),
+            state,
+            Text(_terminal_safe(status.source)),
+            Text(_terminal_safe(capabilities)),
         )
+    console.print(table)
 
 
 @app.command("find")
@@ -434,21 +443,29 @@ def _secret_text(secret: Secret, *, dotenv: bool) -> str:
     return value
 
 
-def _render_metadata_table(matches: list[CredentialMetadata]) -> None:
-    console = Console(file=sys.stdout, highlight=False)
-    table = Table(
-        box=box.SIMPLE_HEAD,
-        pad_edge=False,
+def _console() -> Console:
+    return Console(file=sys.stdout, highlight=False)
+
+
+def _table() -> Table:
+    return Table(
+        box=box.ROUNDED,
+        header_style="bold",
+        pad_edge=True,
         padding=(0, 1),
-        show_footer=False,
     )
-    table.add_column("REFERENCE", min_width=34, no_wrap=True)
+
+
+def _render_metadata_table(matches: list[CredentialMetadata]) -> None:
+    console = _console()
+    table = _table()
+    table.add_column("Reference", min_width=34, no_wrap=True)
     table.add_column(
-        "PROVIDER", min_width=8, max_width=8, no_wrap=True, overflow="ellipsis"
+        "Provider", min_width=8, max_width=8, no_wrap=True, overflow="ellipsis"
     )
-    table.add_column("SERVICE", min_width=7, no_wrap=True, overflow="ellipsis")
-    table.add_column("ACCOUNT", min_width=7, no_wrap=True, overflow="ellipsis")
-    table.add_column("LABEL", min_width=5, no_wrap=True, overflow="ellipsis")
+    table.add_column("Service", min_width=7, no_wrap=True, overflow="ellipsis")
+    table.add_column("Account", min_width=7, no_wrap=True, overflow="ellipsis")
+    table.add_column("Label", min_width=5, no_wrap=True, overflow="ellipsis")
     for item in matches:
         table.add_row(
             Text(_abbreviate_reference(item.reference)),
