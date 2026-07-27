@@ -96,7 +96,7 @@ def test_version() -> None:
     result = runner.invoke(app, ["--version"])
 
     assert result.exit_code == 0
-    assert result.stdout == "ainv 0.1.0\n"
+    assert result.stdout == "ainv 0.1.1\n"
 
 
 def test_no_args_shows_help() -> None:

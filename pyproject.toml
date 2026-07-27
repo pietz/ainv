@@ -1,6 +1,6 @@
 [project]
 name = "ainv"
-version = "0.1.0"
+version = "0.1.1"
 description = "Agent-first credential delivery from existing providers"
 readme = "README.md"
 authors = [
@@ -20,6 +20,11 @@ dependencies = [
     "rich>=13",
     "typer>=0.16",
 ]
+
+[project.urls]
+Homepage = "https://github.com/pietz/ainv"
+Repository = "https://github.com/pietz/ainv"
+Issues = "https://github.com/pietz/ainv/issues"
 
 [project.scripts]
 ainv = "ainv.cli:main"

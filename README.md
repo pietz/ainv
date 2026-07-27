@@ -26,16 +26,18 @@ hygiene: resolved values stay out of routine model context, shell arguments, and
 > This project is an early development preview. The current release supports
 > non-synchronizable generic passwords in the default macOS Keychain only.
 
-The proposed product and security contract is documented in [SPEC.md](SPEC.md).
+The proposed product and security contract is documented in
+[SPEC.md](https://github.com/pietz/ainv/blob/main/SPEC.md).
 
 ## Installation
 
 > [!WARNING]
-> Version 0.1.0 is a pre-alpha name-reservation and evaluation release. In the
-> current `uv tool` distribution, macOS Keychain trusts the uv-managed Python
-> interpreter, not the `ainv` command. Do not treat it as a stable,
-> least-privilege identity for unattended high-value credentials. See
-> [SECURITY.md](SECURITY.md) before choosing Keychain approval.
+> Version 0.1.1 is a pre-alpha evaluation release. In the current `uv tool`
+> distribution, macOS Keychain trusts the uv-managed Python interpreter, not the
+> `ainv` command. Do not treat it as a stable, least-privilege identity for
+> unattended high-value credentials. See
+> [SECURITY.md](https://github.com/pietz/ainv/blob/main/SECURITY.md) before
+> choosing Keychain approval.
 
 Install the published package with:
 
@@ -116,8 +118,9 @@ item does not revoke it remotely.
 
 ## Agent skill
 
-The repository includes an optional agent skill at [`skills/ainv`](skills/ainv).
-Install it into the canonical shared skills directory with:
+The repository includes an optional agent skill at
+[`skills/ainv`](https://github.com/pietz/ainv/tree/main/skills/ainv). Install it
+into the canonical shared skills directory with:
 
 ```console
 mkdir -p ~/.agents/skills
