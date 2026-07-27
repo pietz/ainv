@@ -43,8 +43,10 @@ ainv find openai
 ainv find openai --json
 ```
 
-Use the exact opaque reference returned by `find`. Narrow broad queries rather
-than enumerating unrelated metadata.
+The human table abbreviates long references. Use `--json` when selecting a
+credential, and pass the exact complete reference from its structured output to
+the next command. Narrow broad queries rather than enumerating unrelated
+metadata.
 
 ## Add a missing credential
 

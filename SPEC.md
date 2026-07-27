@@ -87,13 +87,19 @@ The query must be nonempty. Full metadata enumeration is not supported in the
 MVP. Results use a conservative default limit of 20, with a maximum of 100,
 and are ordered by provider, normalized service/name, account, and canonical
 reference for deterministic output. Provider metadata is escaped before human
-terminal rendering to prevent control-character or terminal-sequence injection.
+terminal rendering to prevent control-character, terminal-sequence, or Rich
+markup injection. The human table abbreviates long references by preserving a
+substantial prefix and the final characters. This is display-only; JSON retains
+the exact canonical reference.
 
 Example human-readable output:
 
 ```text
-REF                                                        PROVIDER  SERVICE         ACCOUNT
-keychain://v1/item/PERSISTENT_REF                                keychain  OPENAI_API_KEY  personal
+REFERENCE                           PROVIDER  SERVICE         ACCOUNT   LABEL
+──────────────────────────────────  ────────  ──────────────  ────────  ──────────────
+keychain://v1/item/PERS...T_REF     keychain  OPENAI_API_KEY  personal  OpenAI API key
+
+Use --json for complete references.
 ```
 
 Search is case-insensitive across provider-approved metadata fields. It never

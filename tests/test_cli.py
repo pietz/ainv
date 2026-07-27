@@ -72,9 +72,13 @@ class FakeCreator(FakeProvider):
         )
 
 
-def metadata(*, label: str = "Synthetic credential") -> CredentialMetadata:
+def metadata(
+    *,
+    label: str = "Synthetic credential",
+    reference: str = "keychain://v1/item/c3ludGhldGlj",
+) -> CredentialMetadata:
     return CredentialMetadata(
-        reference="keychain://v1/item/c3ludGhldGlj",
+        reference=reference,
         provider="keychain",
         name="OPENAI_API_KEY",
         account="personal",
@@ -102,8 +106,11 @@ def test_no_args_shows_help() -> None:
     assert "Move secrets from credential providers" in result.stdout
 
 
-def test_find_json_returns_metadata_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    install_provider(monkeypatch, FakeProvider([metadata()]))
+def test_find_json_returns_complete_metadata_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reference = "keychain://v1/item/" + "a" * 64
+    install_provider(monkeypatch, FakeProvider([metadata(reference=reference)]))
 
     result = runner.invoke(app, ["find", "openai", "--json"])
 
@@ -111,16 +118,46 @@ def test_find_json_returns_metadata_only(monkeypatch: pytest.MonkeyPatch) -> Non
     document = json.loads(result.stdout)
     assert document["schema_version"] == 1
     assert document["matches"][0]["name"] == "OPENAI_API_KEY"
+    assert document["matches"][0]["ref"] == reference
     assert CANARY not in result.stdout
 
 
-def test_find_sanitizes_terminal_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
-    install_provider(monkeypatch, FakeProvider([metadata(label="safe\n\x1b[31mspoof")]))
+def test_find_renders_clean_table_with_abbreviated_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reference = "keychain://v1/item/" + "a" * 48 + "tailend8"
+    install_provider(monkeypatch, FakeProvider([metadata(reference=reference)]))
 
     result = runner.invoke(app, ["find", "openai"])
 
     assert result.exit_code == 0
-    assert "safe\\n\\x1b[31mspoof" in result.stdout
+    assert "REFERENCE" in result.stdout
+    assert "PROVIDER" in result.stdout
+    assert "keychain://v1/item/aaaa...tailend8" in result.stdout
+    assert reference not in result.stdout
+    assert "Use --json for complete references." in result.stdout
+
+
+def test_find_keeps_short_reference_complete(monkeypatch: pytest.MonkeyPatch) -> None:
+    item = metadata()
+    install_provider(monkeypatch, FakeProvider([item]))
+
+    result = runner.invoke(app, ["find", "openai"])
+
+    assert result.exit_code == 0
+    assert item.reference in result.stdout
+
+
+def test_find_sanitizes_terminal_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    install_provider(
+        monkeypatch,
+        FakeProvider([metadata(label="[b]\n\x1b")]),
+    )
+
+    result = runner.invoke(app, ["find", "openai"])
+
+    assert result.exit_code == 0
+    assert "[b]\\n" in result.stdout
     assert "\x1b" not in result.stdout
 
 

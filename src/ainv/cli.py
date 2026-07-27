@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Annotated, Never
 
 import typer
+from rich import box
+from rich.console import Console
+from rich.table import Table
+from rich.text import Text
 
 from ainv import __version__
 from ainv.dotenv import (
@@ -165,22 +169,8 @@ def find_command(
                 sort_keys=True,
             )
         )
-    else:
-        if matches:
-            typer.echo("REF  PROVIDER  SERVICE  ACCOUNT  LABEL")
-        for item in matches:
-            typer.echo(
-                "  ".join(
-                    _terminal_safe(value)
-                    for value in (
-                        item.reference,
-                        item.provider,
-                        item.name,
-                        item.account,
-                        item.label,
-                    )
-                )
-            )
+    elif matches:
+        _render_metadata_table(matches)
     if not matches:
         raise typer.Exit(3)
 
@@ -442,6 +432,42 @@ def _secret_text(secret: Secret, *, dotenv: bool) -> str:
     if dotenv and ("\r" in value or "\n" in value):
         raise InvalidSecretValueError("resolved value must be single-line")
     return value
+
+
+def _render_metadata_table(matches: list[CredentialMetadata]) -> None:
+    console = Console(file=sys.stdout, highlight=False)
+    table = Table(
+        box=box.SIMPLE_HEAD,
+        pad_edge=False,
+        padding=(0, 1),
+        show_footer=False,
+    )
+    table.add_column("REFERENCE", min_width=34, no_wrap=True)
+    table.add_column(
+        "PROVIDER", min_width=8, max_width=8, no_wrap=True, overflow="ellipsis"
+    )
+    table.add_column("SERVICE", min_width=7, no_wrap=True, overflow="ellipsis")
+    table.add_column("ACCOUNT", min_width=7, no_wrap=True, overflow="ellipsis")
+    table.add_column("LABEL", min_width=5, no_wrap=True, overflow="ellipsis")
+    for item in matches:
+        table.add_row(
+            Text(_abbreviate_reference(item.reference)),
+            Text(_terminal_safe(item.provider)),
+            Text(_terminal_safe(item.name)),
+            Text(_terminal_safe(item.account)),
+            Text(_terminal_safe(item.label)),
+        )
+    console.print(table)
+    console.print(Text("Use --json for complete references."), style="dim")
+
+
+def _abbreviate_reference(reference: str) -> str:
+    max_length = 34
+    head_length = 23
+    tail_length = max_length - head_length - len("...")
+    if len(reference) <= max_length:
+        return reference
+    return f"{reference[:head_length]}...{reference[-tail_length:]}"
 
 
 def _metadata_json(metadata: CredentialMetadata) -> dict[str, str | None]:

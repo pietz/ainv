@@ -17,6 +17,7 @@ classifiers = [
 ]
 dependencies = [
     "pyobjc-framework-security>=11 ; sys_platform == 'darwin'",
+    "rich>=13",
     "typer>=0.16",
 ]
 

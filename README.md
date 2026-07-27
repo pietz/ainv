@@ -70,7 +70,11 @@ ainv find openai
 ainv find openai --json
 ```
 
-Use the opaque reference returned by `find` to set one dotenv entry:
+The human-readable table abbreviates long references for readability. Use
+`--json` when you need the complete opaque reference for another command.
+
+Use the complete opaque reference returned by `find --json` to set one dotenv
+entry:
 
 ```console
 ainv set 'keychain://v1/item/REFERENCE' --as OPENAI_API_KEY --file .env
