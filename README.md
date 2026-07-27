@@ -32,7 +32,7 @@ The proposed product and security contract is documented in
 ## Installation
 
 > [!WARNING]
-> Version 0.1.1 is a pre-alpha evaluation release. In the current `uv tool`
+> Version 0.1.2 is a pre-alpha evaluation release. In the current `uv tool`
 > distribution, macOS Keychain trusts the uv-managed Python interpreter, not the
 > `ainv` command. Do not treat it as a stable, least-privilege identity for
 > unattended high-value credentials. See
