@@ -150,12 +150,17 @@ Test the popup without accessing any credential:
 ainv config --test-popup
 ```
 
-The dialog shows value-free credential IDs, destination variables, the target
-command or file, and working directory. It offers **Deny** and **Allow Once**.
-One dialog covers up to ten bindings in an invocation and appears after
-destination validation but before any credential resolution. Review context is escaped and
-must fit completely in the dialog; it is never silently truncated. When
-approval is enabled, `--no-input` fails closed instead of displaying UI.
+The **ainv Access Requested** dialog shows the nearest bundled application found
+in native process ancestry and uses its icon when available. This best-effort
+requester context is informational, not authenticated; the dialog uses a neutral
+unidentified label and no requester icon when ancestry does not provide one. The
+dialog also shows value-free credential IDs, destination variables, the target
+command or file, and working directory. It offers
+**Deny** and **Allow Once**. One dialog covers up to ten bindings in an
+invocation and appears after destination validation but before any credential
+resolution. Review context is escaped and must fit completely in the dialog; it
+is never silently truncated. When approval is enabled, `--no-input` fails
+closed instead of displaying UI.
 
 Configuration lives at
 `~/Library/Application Support/ainv/config.toml`. This popup adds human

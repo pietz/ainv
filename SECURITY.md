@@ -29,9 +29,12 @@ this guidance is not an enforcement boundary.
 
 When `approval = "always"`, `ainv run` and `ainv set` display one native AppKit
 dialog after destination validation and before secret resolution. The dialog
-contains only credential metadata and delivery context. Denial prevents
-Keychain resolution and delivery. `--no-input`, invalid configuration, and an
-unavailable graphical session fail closed.
+contains only credential metadata and delivery context. It uses native process
+ancestry and running-application metadata to show the nearest bundled ancestor,
+with a neutral fallback otherwise. This best-effort context may be absent or
+inaccurate and is not authenticated identity. Denial prevents Keychain
+resolution and delivery. `--no-input`, invalid configuration, and an unavailable
+graphical session fail closed.
 
 This is an oversight and accidental-use control, not an authorization boundary.
 A shell-capable process running as the user can edit the configuration, bypass

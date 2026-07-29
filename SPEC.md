@@ -302,13 +302,23 @@ ainv config --test-popup
 Configuration is stored at
 `~/Library/Application Support/ainv/config.toml`. `off` is the default. In
 `always` mode, `run` and `set` display one AppKit dialog after destination
-validation and before provider resolution. One dialog covers up to ten bindings
-and shows credential IDs, destination variables, target command or file, and
-working directory without secret values. Control characters and Unicode line
-separators are escaped. Context that cannot be displayed completely within
-strict bounds fails closed rather than being truncated. The only decisions are
-**Deny** and **Allow Once**. Denial starts no command, resolves no credential,
-and mutates no file.
+validation and before provider resolution. The dialog is titled **ainv Access
+Requested**. It walks native process ancestry and shows the nearest bundled
+application reported by `NSRunningApplication`, with that application's icon
+when available. It does not use environment claims for requester attribution.
+Failure to find a bundled ancestor produces a neutral unidentified-application
+label and no custom requester icon. This best-effort context is informational,
+not an authenticated process identity, and may be absent or inaccurate.
+
+One dialog covers up to ten bindings and shows credential IDs, destination
+variables, target command or file, and working directory without secret values.
+Control characters and Unicode line separators are escaped. Context that cannot
+be displayed completely within strict bounds fails closed rather than being
+truncated. The only decisions are **Deny** and **Allow Once**. The Return key
+equivalent and default button cell are cleared for **Allow Once**, Escape
+selects denial, and every response other
+than an explicit **Allow Once** denies. Denial starts no command, resolves no
+credential, and mutates no file.
 
 `--no-input`, malformed or unsafe configuration, and unavailable graphical UI
 fail closed. `--test-popup` exercises only the dialog and accesses no provider.
