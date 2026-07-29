@@ -163,11 +163,65 @@ is never silently truncated. When approval is enabled, `--no-input` fails
 closed instead of displaying UI.
 
 Configuration lives at
-`~/Library/Application Support/ainv/config.toml`. This popup adds human
-oversight and reduces unnoticed use. It is not a hard permission boundary: a
-shell-capable process running as the same user can edit configuration, bypass
-`ainv`, or invoke provider-native tools. Keychain may show its own separate
-system authorization dialog after ainv approval.
+`~/Library/Application Support/ainv/config.toml`. Parsing is strict: malformed
+TOML and unknown settings fail instead of being ignored. Inspect and repair the
+file manually when settings must be preserved, or explicitly replace it with
+safe defaults using `ainv config --reset`. Reset cannot be combined with other
+config changes and does not override ownership, link, or permission checks.
+Default `history = "on"` is omitted when writing so approval-only configuration
+remains readable by older strict versions where possible.
+
+This popup adds human oversight and reduces unnoticed use. It is not a hard
+permission boundary: a shell-capable process running as the same user can edit
+configuration, bypass `ainv`, or invoke provider-native tools. Keychain may show
+its own separate system authorization dialog after ainv approval.
+
+## Local activity history
+
+`run` and `set` authorization decisions are recorded locally by default:
+
+```console
+ainv history
+ainv history --limit 50
+ainv history --json
+```
+
+This is value-free **activity history**, not a security audit and not proof that
+a credential was delivered or a recipient completed successfully. A record is
+written after destination validation and before provider resolution. It includes
+the time, action, authorization outcome and reason, credential references,
+destination variable names, working directory, safe destination summary, and a
+best-effort requester application when available. Outcomes distinguish an
+explicit user denial from approval errors. Command records contain only the
+executable name or path and argument count, never argument contents. Secret
+values, resolved environments, and child output are never recorded.
+
+Every metadata field is byte-bounded. Large requests retain the total binding
+count, a bounded subset, the omitted count, and explicit field-truncation or
+filesystem-text escaping metadata, so extreme valid invocation metadata cannot
+suppress its event.
+
+History metadata can itself reveal credential names, accounts, project paths,
+executables, requester context, authorization reasons, and usage patterns to
+someone with local account access. It is kept in a private, size-bounded JSONL
+file with at most one rotated backup at
+`~/Library/Application Support/ainv/history.jsonl`. Records are append-written,
+but the file is not immutable or tamper-evident. Disable future recording when
+this local metadata is not wanted:
+
+```console
+ainv config --history off
+ainv config --history on
+```
+
+Writers and readers retry a contended advisory lock within a bounded 7 ms sleep
+budget. If contention remains, a write emits a generic warning without blocking
+an otherwise approved delivery, while a read fails cleanly through the normal
+CLI error contract. Reads strictly validate each JSONL line, skip malformed and
+partial records, and report only a value-free invalid-record count. A later
+append starts on a fresh line after a partial tail, so valid future activity
+remains readable. Unsafe paths, ownership, links, and permissions still fail the
+whole read. `config --test-popup` is never recorded.
 
 ## Deliberate omissions
 

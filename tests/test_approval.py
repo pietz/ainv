@@ -17,6 +17,7 @@ from ainv.approval import (
     ApprovalUnavailableError,
     DeliveryAction,
     MacOSApprover,
+    RequestingApplication,
     _native_parent_process_id,
     _ProcBSDShortInfo,
     _request_text,
@@ -494,17 +495,15 @@ def test_native_alert_clears_return_key_and_maps_only_allow_response(
 ) -> None:
     appkit = approval_appkit()
     icon = object()
-    requester = SimpleNamespace(name="iTerm2", icon=icon)
+    requester = RequestingApplication(name="iTerm2", icon=icon)
     monkeypatch.setattr("ainv.approval.sys.platform", "darwin")
-    monkeypatch.setattr(
-        "ainv.approval._requesting_application", lambda _appkit: requester
-    )
     monkeypatch.setitem(sys.modules, "AppKit", appkit)
     request = ApprovalRequest(
         action=DeliveryAction.RUN,
         bindings=(),
         destination="command",
         working_directory="/tmp/project",
+        requester=requester,
     )
 
     FakeAlert.response = 1_000
@@ -528,7 +527,6 @@ def test_native_alert_uses_no_requester_icon_for_unknown_identity(
 ) -> None:
     appkit = approval_appkit()
     monkeypatch.setattr("ainv.approval.sys.platform", "darwin")
-    monkeypatch.setattr("ainv.approval._requesting_application", lambda _appkit: None)
     monkeypatch.setitem(sys.modules, "AppKit", appkit)
 
     FakeAlert.response = 1_001

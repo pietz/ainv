@@ -28,7 +28,9 @@ storage nor encryption.
 1. **Safe by default.** `ainv` reduces accidental credential exposure by never
    writing resolved values to its own stdout, stderr, logs, diagnostics, or
    arguments. Child output remains outside this guarantee.
-2. **Stateless by default.** Discovery and delivery require no project files.
+2. **No project state.** Discovery and delivery require no project files.
+   Optional user-level controls and default local activity history remain outside
+   projects.
 3. **Provider-owned values.** Providers remain the source of truth, while
    authentication, metadata, approval behavior, and failures remain
    provider-specific. Provider breadth is not a product goal.
@@ -44,6 +46,8 @@ storage nor encryption.
 9. **Optional human oversight.** A user may require one value-free native
    consent dialog before each delivery. This is an accidental-use control, not
    containment against a shell-capable process.
+10. **Honest local history.** Default value-free activity history describes an
+    authorization decision, not completed delivery and not a security audit.
 
 ## 3. Non-goals
 
@@ -322,10 +326,71 @@ credential, and mutates no file.
 
 `--no-input`, malformed or unsafe configuration, and unavailable graphical UI
 fail closed. `--test-popup` exercises only the dialog and accesses no provider.
-The configuration file and its directory reject unsafe ownership, links, and
-write permissions; writes are atomic. This improves human oversight but is not
-a hard boundary because a same-user shell process can edit configuration or
-bypass `ainv` entirely.
+The configuration file and its directory require user-only permissions and
+reject unsafe ownership and links; writes are atomic. Parsing remains strict.
+Malformed TOML and unknown settings are never silently discarded by an update.
+`ainv config --reset` is the narrow, explicit repair path: it replaces the file
+with safe defaults, cannot be combined with other config options, and does not
+weaken filesystem checks. Writers omit the default `history = "on"` key so
+approval-only files remain compatible with older strict versions where
+possible. This improves human oversight but is not a hard boundary because a
+same-user shell process can edit configuration or bypass `ainv` entirely.
+
+### 5.7 Inspect local activity history
+
+```console
+ainv history
+ainv history --limit 50
+ainv history --json
+ainv config --history on
+ainv config --history off
+```
+
+History is enabled by default. For every `run` and `set` request that passes
+destination validation, record the authorization outcome before provider secret
+resolution: `allowed`, explicit `denied`, `not_requested` when approval is
+disabled, or `error` when authorization could not be completed. Reasons include
+`user_allowed`, `user_denied`, `approval_disabled`, `approval_unavailable`,
+`interactive_input_disabled`, `too_many_bindings`, and
+`working_directory_unavailable`. `config --test-popup` is excluded.
+
+Each versioned JSONL record contains the timestamp, action, outcome and reason,
+credential references and destination variable names, working directory, a safe
+destination summary, and best-effort requester application identity when
+available. Resolve requester identity once per authorization; the dialog and
+record use that same result. Every metadata field is byte-bounded. A large
+binding set retains its total count, a bounded subset, an omitted count, and
+explicit field-truncation or filesystem-text escaping metadata. A run summary
+stores only `command[0]` and
+the count of remaining arguments. It must never store argument contents,
+resolved values or environments, child stdout or stderr, or any claim that
+resolution, delivery, execution, or recipient behavior completed. Set records
+use the canonical destination file path.
+
+The fixed passwd-derived location is
+`~/Library/Application Support/ainv/history.jsonl`; `HOME` is never trusted.
+Create its directory and file with modes `0700` and `0600`. Reject unsafe
+ownership, symlinks, hard links, group/world permissions, and non-regular files.
+Append-write one bounded record under an advisory lock acquired with
+nonblocking attempts and a bounded 7 ms retry sleep budget. Shared read-lock
+acquisition uses the same budget. Cap the active file at 1 MiB and retain at most
+one private rotated backup. Append-writing and rotation do not provide
+immutability or tamper evidence. Reads strictly validate each JSONL line,
+skip malformed, oversized, or partial records, and expose only a count of
+invalid records. A future append starts on a new line after a partial tail.
+Unsafe paths, ownership, links, permissions, or file types remain hard errors.
+
+History write failure, including contention after bounded retries, is non-fatal
+to credential delivery: emit only a generic stderr warning, without native
+exception details, and continue an otherwise authorized operation. Read
+contention after bounded retries fails through the normal generic read error. The
+human view is compact and emits a generic malformed-record
+warning when needed. JSON output has the normal CLI schema version, includes
+independently versioned records, and exposes `invalid_record_count`. History is local
+operational metadata, not a security audit: a same-user process can disable,
+edit, delete, or bypass it. Documentation must call out that references,
+accounts, paths, executables, requester context, and usage patterns may be
+private even without secret values.
 
 ## 6. CLI contract
 
@@ -337,7 +402,8 @@ ainv [--no-input] add SERVICE --provider NAME --account ACCOUNT [--label LABEL]
 ainv [--no-input] set [NAME=]CREDENTIAL... [--file PATH] [--force] [--allow-unignored] [--allow-tracked]
 ainv [--no-input] run [NAME=]CREDENTIAL... [--] COMMAND [ARG ...]
 ainv providers [--json]
-ainv config [--approval off|always] [--test-popup]
+ainv history [--limit N] [--json]
+ainv config [--approval off|always] [--history on|off] [--test-popup] [--reset]
 ainv --help
 ainv --version
 ```
@@ -361,7 +427,7 @@ agent instructions.
 
 - Human output goes to stdout; warnings and errors go to stderr.
 - `--json` emits one JSON document and no decorations or progress indicators.
-  It is initially supported by `find` and `providers` only.
+  It is supported by `find`, `providers`, and `history`.
 - JSON success documents include `schema_version: 2`. Runtime JSON failures use
   `{\"schema_version\": 2, \"error\": {\"code\": ..., \"message\": ...}}`.
   Typer/Click usage errors occur before command execution and retain their
@@ -660,7 +726,9 @@ code.
 
 `ainv` will not include telemetry in the initial release. It must not send
 queries, references, provider metadata, paths, command arguments, or usage data
-to a project-operated service.
+to a project-operated service. Default local activity history remains on the
+user's machine and is subject to the privacy and integrity limits in section
+5.7.
 
 Provider-native tools may have their own telemetry and policies; documentation
 should link to them without implying control by `ainv`.
@@ -675,6 +743,9 @@ should link to them without implying control by `ainv`.
 - atomic-write rollback paths;
 - binding parsing and environment construction;
 - JSON schemas and exit-code mapping;
+- enabled and disabled history, all authorization outcomes, ordering, privacy,
+  path safety, permissions, rotation, corruption, bounded records, bounded lock
+  retries, and non-blocking-delivery write failures;
 - secret canaries absent from every captured output and exception.
 
 Unit tests use fake providers and synthetic canary values.

@@ -8,7 +8,9 @@ import shlex
 import sys
 import termios
 import unicodedata
-from datetime import datetime
+from collections.abc import Callable
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Never
 
@@ -27,12 +29,15 @@ from ainv.approval import (
     Approver,
     DeliveryAction,
     MacOSApprover,
+    RequestingApplication,
+    requesting_application,
     test_request,
 )
 from ainv.config import (
     ApprovalMode,
     Config,
     ConfigurationError,
+    HistoryMode,
     config_path,
     load_config,
     save_config,
@@ -58,6 +63,16 @@ from ainv.git import (
     GitSafetyError,
     destination_status,
     enforce_destination_policy,
+)
+from ainv.history import (
+    HistoryDecision,
+    HistoryError,
+    HistoryReadResult,
+    HistoryRecord,
+    append_history,
+    bounded_history_record,
+    read_history,
+    utc_timestamp,
 )
 from ainv.models import CredentialMetadata, ProviderCapability, Secret
 from ainv.providers.base import CredentialCreator, CredentialProvider
@@ -151,32 +166,96 @@ def config_command(
         ApprovalMode | None,
         typer.Option(help="Set delivery approval behavior."),
     ] = None,
+    history: Annotated[
+        HistoryMode | None,
+        typer.Option(help="Enable or disable local activity history."),
+    ] = None,
     test_popup: Annotated[
         bool,
         typer.Option("--test-popup", help="Show a harmless approval test."),
     ] = False,
+    reset: Annotated[
+        bool,
+        typer.Option(
+            "--reset",
+            help="Replace a malformed or unsupported config with safe defaults.",
+        ),
+    ] = False,
 ) -> None:
-    """Show or update human-consent configuration."""
+    """Show or update human-consent and activity-history configuration."""
+    if reset and (approval is not None or history is not None or test_popup):
+        _fail("--reset cannot be combined with other config options", 2)
     try:
         configuration_path = config_path()
-        if approval is not None:
-            save_config(Config(approval=approval), configuration_path)
-        current = load_config(configuration_path)
+        if reset:
+            save_config(Config(), configuration_path)
+            current = load_config(configuration_path)
+        else:
+            current = load_config(configuration_path)
+            if approval is not None or history is not None:
+                current = replace(
+                    current,
+                    approval=current.approval if approval is None else approval,
+                    history=current.history if history is None else history,
+                )
+                save_config(current, configuration_path)
+                current = load_config(configuration_path)
     except ConfigurationError as error:
         _fail(str(error), 1)
 
     typer.echo(f"Approval: {current.approval.value}")
+    typer.echo(f"History: {current.history.value}")
     typer.echo(f"Config: {_terminal_safe(str(configuration_path))}")
     if not test_popup:
         return
     if _no_input(ctx):
         _fail("approval popup requires interactive input", 5)
     try:
-        allowed = _get_approver().approve(test_request())
+        allowed = _get_approver().approve(
+            test_request(requester=_get_requester_application())
+        )
     except ApprovalUnavailableError as error:
         _fail(str(error), 5)
     result = "allowed" if allowed else "denied"
     typer.echo(f"Approval popup result: {result}.")
+
+
+@app.command("history")
+def history_command(
+    limit: Annotated[
+        int, typer.Option(min=1, max=1000, help="Maximum number of recent events.")
+    ] = 20,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit structured JSON.")
+    ] = False,
+) -> None:
+    """Show local value-free credential delivery activity."""
+    try:
+        result = _read_history_records(limit)
+    except HistoryError as error:
+        _fail(str(error), 1, as_json=as_json)
+    if as_json:
+        typer.echo(
+            json.dumps(
+                {
+                    "schema_version": _SCHEMA_VERSION,
+                    "history": [record.to_dict() for record in result.records],
+                    "invalid_record_count": result.invalid_record_count,
+                },
+                sort_keys=True,
+            )
+        )
+        return
+    if result.invalid_record_count:
+        suffix = "record" if result.invalid_record_count == 1 else "records"
+        typer.echo(
+            f"Warning: skipped {result.invalid_record_count} malformed activity history {suffix}.",
+            err=True,
+        )
+    if not result.records:
+        typer.echo("No activity history.")
+        return
+    _render_history_table(list(result.records))
 
 
 @app.command("providers")
@@ -358,11 +437,16 @@ def set_command(
             allow_tracked=allow_tracked,
             allow_unignored=allow_unignored,
         )
-        _request_approval(
+        canonical_destination = _approval_file_destination(file)
+        _authorize_delivery(
             ctx,
             action=DeliveryAction.SET,
             bindings=bindings,
-            destination=_approval_file_destination(file),
+            approval_destination=canonical_destination,
+            history_destination={
+                "kind": "dotenv_file",
+                "path": canonical_destination,
+            },
         )
         provider_bindings = [
             (name, reference, _provider_for_reference(reference))
@@ -411,11 +495,16 @@ def set_command(
 def run_command(ctx: typer.Context) -> None:
     """Inject selected credentials into one child process."""
     bindings, command = _parse_run_arguments(ctx.args)
-    _request_approval(
+    _authorize_delivery(
         ctx,
         action=DeliveryAction.RUN,
         bindings=bindings,
-        destination=shlex.join(command),
+        approval_destination=lambda: shlex.join(command),
+        history_destination={
+            "kind": "command",
+            "executable": command[0],
+            "argument_count": len(command) - 1,
+        },
     )
     environment = os.environ.copy()
     resolved: dict[str, str] = {}
@@ -458,42 +547,107 @@ def _get_approver() -> Approver:
     return MacOSApprover()
 
 
-def _request_approval(
+def _get_requester_application() -> RequestingApplication | None:
+    try:
+        return requesting_application()
+    except Exception:  # noqa: BLE001 - requester metadata is best effort
+        return None
+
+
+def _write_history_record(record: HistoryRecord) -> None:
+    append_history(record)
+
+
+def _read_history_records(limit: int) -> HistoryReadResult:
+    return read_history(limit=limit)
+
+
+def _history_clock() -> datetime:
+    return datetime.now(UTC)
+
+
+def _authorize_delivery(
     ctx: typer.Context,
     *,
     action: DeliveryAction,
     bindings: list[tuple[str, str]],
-    destination: str,
+    approval_destination: str | Callable[[], str],
+    history_destination: dict[str, str | int],
 ) -> None:
     try:
         configuration = _get_config()
     except ConfigurationError as error:
         _fail(str(error), 5)
-    if configuration.approval is ApprovalMode.OFF:
-        return
-    if len(bindings) > MAX_APPROVAL_BINDINGS:
-        _fail("too many credentials for native approval", 5)
-    if _no_input(ctx):
-        _fail("credential delivery approval requires interactive input", 5)
+
     try:
         working_directory = os.getcwd()
     except OSError:
+        working_directory = "(unavailable)"
+    requester = (
+        _get_requester_application()
+        if configuration.history is HistoryMode.ON
+        or configuration.approval is ApprovalMode.ALWAYS
+        else None
+    )
+
+    def record(decision: HistoryDecision, reason: str) -> None:
+        if configuration.history is HistoryMode.OFF:
+            return
+        try:
+            _write_history_record(
+                bounded_history_record(
+                    timestamp=utc_timestamp(_history_clock()),
+                    action="run" if action is DeliveryAction.RUN else "set",
+                    decision=decision,
+                    reason=reason,
+                    bindings=bindings,
+                    destination=history_destination,
+                    working_directory=working_directory,
+                    requester_app=requester.name if requester is not None else None,
+                )
+            )
+        except Exception:  # noqa: BLE001 - native details may contain private data
+            typer.echo(
+                "Warning: could not record ainv activity history.",
+                err=True,
+            )
+
+    if configuration.approval is ApprovalMode.OFF:
+        record(HistoryDecision.NOT_REQUESTED, "approval_disabled")
+        return
+    if len(bindings) > MAX_APPROVAL_BINDINGS:
+        record(HistoryDecision.ERROR, "too_many_bindings")
+        _fail("too many credentials for native approval", 5)
+    if _no_input(ctx):
+        record(HistoryDecision.ERROR, "interactive_input_disabled")
+        _fail("credential delivery approval requires interactive input", 5)
+    if working_directory == "(unavailable)":
+        record(HistoryDecision.ERROR, "working_directory_unavailable")
         _fail("could not determine working directory for approval", 5)
+    destination_text = (
+        approval_destination()
+        if callable(approval_destination)
+        else approval_destination
+    )
     request = ApprovalRequest(
         action=action,
         bindings=tuple(
             ApprovalBinding(credential=reference, variable=variable)
             for variable, reference in bindings
         ),
-        destination=destination,
+        destination=destination_text,
         working_directory=working_directory,
+        requester=requester,
     )
     try:
         allowed = _get_approver().approve(request)
     except ApprovalUnavailableError as error:
+        record(HistoryDecision.ERROR, "approval_unavailable")
         _fail(str(error), 5)
     if not allowed:
+        record(HistoryDecision.DENIED, "user_denied")
         _fail("credential delivery was denied", 5)
+    record(HistoryDecision.ALLOWED, "user_allowed")
 
 
 def _provider_for_reference(reference: str) -> CredentialProvider:
@@ -531,6 +685,8 @@ def _parse_run_arguments(
         _fail("run requires at least one credential binding", 2)
     if not command:
         _fail("run requires a child command", 2)
+    if not command[0]:
+        _fail("run requires a nonempty child executable", 2)
     return _parse_bindings(binding_arguments), command
 
 
@@ -680,6 +836,56 @@ def _table() -> Table:
         pad_edge=True,
         padding=(0, 1),
     )
+
+
+def _render_history_table(records: list[HistoryRecord]) -> None:
+    console = _console()
+    table = _table()
+    table.add_column("Timestamp", no_wrap=True)
+    table.add_column("Decision", no_wrap=True)
+    table.add_column("Action", no_wrap=True)
+    table.add_column("Details")
+    reason_labels = {
+        "approval_disabled": "approval disabled",
+        "approval_unavailable": "approval unavailable",
+        "interactive_input_disabled": "interactive input disabled",
+        "too_many_bindings": "too many bindings",
+        "user_allowed": "human allowed once",
+        "user_denied": "human denied",
+        "working_directory_unavailable": "working directory unavailable",
+    }
+    for record in records:
+        credentials = "\n".join(
+            f"{_terminal_safe(binding.variable)} ← {_terminal_safe(binding.reference)}"
+            for binding in record.bindings
+        )
+        if record.bindings_omitted:
+            credentials += f"\n… {record.bindings_omitted} more omitted"
+        if record.action == "run":
+            argument_count = record.destination["argument_count"]
+            suffix = "arg" if argument_count == 1 else "args"
+            destination = (
+                f"{record.destination['executable']} (+{argument_count} {suffix})"
+            )
+        else:
+            destination = str(record.destination["path"])
+        details = (
+            f"Reason: {reason_labels[record.reason]}\n"
+            f"Destination: {_terminal_safe(destination)}\n"
+            f"Credentials: {credentials}\n"
+            f"Working directory: {_terminal_safe(record.working_directory)}"
+        )
+        if record.requester_app is not None:
+            details += f"\nRequester: {_terminal_safe(record.requester_app)}"
+        if record.truncated_fields or record.escaped_fields:
+            details += "\nMetadata: bounded representation (truncated or escaped)"
+        table.add_row(
+            Text(_terminal_safe(record.timestamp)),
+            Text(_terminal_safe(record.decision.value.replace("_", " "))),
+            Text(_terminal_safe(record.action)),
+            Text(details),
+        )
+    console.print(table)
 
 
 def _render_metadata_table(matches: list[CredentialMetadata]) -> None:

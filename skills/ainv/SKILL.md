@@ -122,6 +122,26 @@ ainv config --approval off
 consent gate provides human oversight, not containment against a shell-capable
 agent running as the same user.
 
+## Local activity history
+
+`ainv history` shows value-free local authorization activity for `run` and
+`set`; use `--limit N` or `--json` when needed. History is enabled by default
+and can be changed with `ainv config --history on|off`. It records credential
+references, destination variable names, file or executable paths, working
+directories, outcomes and reasons, and best-effort requester context before
+secret resolution. It never records secret values or full command arguments.
+Large or non-UTF-8 filesystem metadata is represented with bounded fields,
+binding counts, and explicit omission, truncation, or escaping metadata.
+Malformed or partial lines are skipped with a value-free warning/count so later
+valid records remain usable. Readers and writers retry brief lock contention
+within a bounded 7 ms sleep budget; residual write contention only warns, while
+residual read contention fails cleanly.
+
+Treat this operational metadata as private. Records are append-written, but
+history is not immutable, tamper-evident, or a security audit, and it does not
+prove delivery or command completion. Do not infer successful recipient
+behavior from an `allowed` event.
+
 ## Keychain dialogs
 
 With the current Python distribution, a dialog may identify `python3.13` rather

@@ -10,6 +10,7 @@ from ainv.config import (
     ApprovalMode,
     Config,
     ConfigurationError,
+    HistoryMode,
     config_path,
     load_config,
     save_config,
@@ -31,14 +32,39 @@ def test_missing_config_defaults_to_approval_off(tmp_path: Path) -> None:
 def test_config_round_trip_is_private_and_atomic(tmp_path: Path) -> None:
     path = tmp_path / "ainv" / "config.toml"
 
-    saved = save_config(Config(approval=ApprovalMode.ALWAYS), path)
+    saved = save_config(
+        Config(approval=ApprovalMode.ALWAYS, history=HistoryMode.OFF), path
+    )
 
     assert saved == path
-    assert load_config(path).approval is ApprovalMode.ALWAYS
-    assert path.read_text() == 'approval = "always"\n'
+    assert load_config(path) == Config(
+        approval=ApprovalMode.ALWAYS, history=HistoryMode.OFF
+    )
+    assert path.read_text() == 'approval = "always"\nhistory = "off"\n'
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
     assert not list(path.parent.glob(".*.tmp"))
+
+
+def test_default_history_key_is_omitted_for_older_strict_versions(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "ainv" / "config.toml"
+
+    save_config(Config(approval=ApprovalMode.ALWAYS), path)
+
+    assert path.read_text() == 'approval = "always"\n'
+    assert load_config(path) == Config(approval=ApprovalMode.ALWAYS)
+
+
+def test_existing_approval_only_config_defaults_history_on(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('approval = "always"\n')
+    path.chmod(0o600)
+
+    assert load_config(path) == Config(
+        approval=ApprovalMode.ALWAYS, history=HistoryMode.ON
+    )
 
 
 def test_config_update_replaces_existing_file(tmp_path: Path) -> None:
@@ -57,6 +83,8 @@ def test_config_update_replaces_existing_file(tmp_path: Path) -> None:
         b"not toml =",
         b'approval = "sometimes"\n',
         b"approval = true\n",
+        b'history = "sometimes"\n',
+        b"history = true\n",
         b'approval = "off"\nunknown = true\n',
         b"\xff",
     ],
@@ -69,12 +97,13 @@ def test_invalid_configuration_fails_closed(tmp_path: Path, contents: bytes) -> 
         load_config(path)
 
 
+@pytest.mark.parametrize("mode", [0o750, 0o705, 0o770, 0o707])
 def test_unsafe_config_directory_fails_closed_even_without_file(
-    tmp_path: Path,
+    tmp_path: Path, mode: int
 ) -> None:
     directory = tmp_path / "ainv"
     directory.mkdir()
-    directory.chmod(0o777)
+    directory.chmod(mode)
     path = directory / "config.toml"
 
     with pytest.raises(ConfigurationError, match="directory is unsafe"):

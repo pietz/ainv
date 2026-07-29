@@ -21,11 +21,19 @@ class ApprovalMode(StrEnum):
     ALWAYS = "always"
 
 
+class HistoryMode(StrEnum):
+    """Whether ainv records local value-free delivery activity."""
+
+    ON = "on"
+    OFF = "off"
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     """Supported user-controlled behavior."""
 
     approval: ApprovalMode = ApprovalMode.OFF
+    history: HistoryMode = HistoryMode.ON
 
 
 class ConfigurationError(Exception):
@@ -46,42 +54,97 @@ def config_path() -> Path:
 def load_config(path: Path | None = None) -> Config:
     """Load strict configuration, defaulting to approvals off when absent."""
     path = config_path() if path is None else path
+    directory_fd: int | None = None
+    file_fd: int | None = None
     try:
-        directory_stat = path.parent.lstat()
-    except FileNotFoundError:
-        return Config()
-    except OSError:
-        raise ConfigurationError("could not inspect ainv configuration") from None
-    _validate_config_directory(directory_stat)
+        try:
+            directory_stat = path.parent.lstat()
+        except FileNotFoundError:
+            return Config()
+        except OSError:
+            raise ConfigurationError("could not inspect ainv configuration") from None
+        _validate_config_directory(directory_stat)
 
-    try:
-        file_stat = path.lstat()
-    except FileNotFoundError:
-        return Config()
-    except OSError:
-        raise ConfigurationError("could not inspect ainv configuration") from None
+        directory_flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            directory_flags |= os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            directory_flags |= os.O_NOFOLLOW
+        try:
+            directory_fd = os.open(path.parent, directory_flags)
+            opened_directory = os.fstat(directory_fd)
+        except OSError:
+            raise ConfigurationError("could not inspect ainv configuration") from None
+        _validate_config_directory(opened_directory)
+        if (directory_stat.st_dev, directory_stat.st_ino) != (
+            opened_directory.st_dev,
+            opened_directory.st_ino,
+        ):
+            raise ConfigurationError("ainv configuration directory is unsafe")
 
-    _validate_config_file(file_stat)
-    try:
-        contents = path.read_bytes()
-    except OSError:
-        raise ConfigurationError("could not read ainv configuration") from None
-    if len(contents) > _MAX_CONFIG_BYTES:
-        raise ConfigurationError("ainv configuration is unexpectedly large")
+        try:
+            file_stat = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return Config()
+        except OSError:
+            raise ConfigurationError("could not inspect ainv configuration") from None
+        _validate_config_file(file_stat)
+
+        file_flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            file_flags |= os.O_NOFOLLOW
+        try:
+            file_fd = os.open(path.name, file_flags, dir_fd=directory_fd)
+            opened_file = os.fstat(file_fd)
+        except OSError:
+            raise ConfigurationError("could not read ainv configuration") from None
+        _validate_config_file(opened_file)
+        if (file_stat.st_dev, file_stat.st_ino) != (
+            opened_file.st_dev,
+            opened_file.st_ino,
+        ):
+            raise ConfigurationError("ainv configuration file is unsafe")
+
+        contents = bytearray()
+        try:
+            while len(contents) <= _MAX_CONFIG_BYTES:
+                chunk = os.read(
+                    file_fd,
+                    min(16 * 1024, _MAX_CONFIG_BYTES + 1 - len(contents)),
+                )
+                if not chunk:
+                    break
+                contents.extend(chunk)
+        except OSError:
+            raise ConfigurationError("could not read ainv configuration") from None
+        if len(contents) > _MAX_CONFIG_BYTES:
+            raise ConfigurationError("ainv configuration is unexpectedly large")
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
     try:
         document = tomllib.loads(contents.decode("utf-8", "strict"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError):
         raise ConfigurationError("ainv configuration is invalid") from None
-    if set(document) - {"approval"}:
+    if set(document) - {"approval", "history"}:
         raise ConfigurationError("ainv configuration contains unsupported settings")
     approval = document.get("approval", ApprovalMode.OFF.value)
+    history = document.get("history", HistoryMode.ON.value)
     if not isinstance(approval, str):
         raise ConfigurationError("ainv approval setting is invalid")
+    if not isinstance(history, str):
+        raise ConfigurationError("ainv history setting is invalid")
     try:
-        mode = ApprovalMode(approval)
+        approval_mode = ApprovalMode(approval)
     except ValueError:
         raise ConfigurationError("ainv approval setting is invalid") from None
-    return Config(approval=mode)
+    try:
+        history_mode = HistoryMode(history)
+    except ValueError:
+        raise ConfigurationError("ainv history setting is invalid") from None
+    return Config(approval=approval_mode, history=history_mode)
 
 
 def save_config(config: Config, path: Path | None = None) -> Path:
@@ -104,7 +167,10 @@ def save_config(config: Config, path: Path | None = None) -> Path:
     if existing is not None:
         _validate_config_file(existing)
 
-    contents = f'approval = "{config.approval.value}"\n'.encode()
+    lines = [f'approval = "{config.approval.value}"']
+    if config.history is not HistoryMode.ON:
+        lines.append(f'history = "{config.history.value}"')
+    contents = ("\n".join(lines) + "\n").encode()
     temporary = f".{path.name}.{token_hex(8)}.tmp"
     directory_fd: int | None = None
     file_fd: int | None = None
@@ -115,6 +181,13 @@ def save_config(config: Config, path: Path | None = None) -> Path:
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         directory_fd = os.open(directory, flags)
+        opened_directory = os.fstat(directory_fd)
+        _validate_config_directory(opened_directory)
+        if (directory_stat.st_dev, directory_stat.st_ino) != (
+            opened_directory.st_dev,
+            opened_directory.st_ino,
+        ):
+            raise ConfigurationError("ainv configuration directory is unsafe")
         create_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
             create_flags |= os.O_NOFOLLOW
@@ -131,7 +204,7 @@ def save_config(config: Config, path: Path | None = None) -> Path:
         )
         temporary = ""
         os.fsync(directory_fd)
-    except OSError:
+    except (OSError, ConfigurationError):
         raise ConfigurationError("could not save ainv configuration") from None
     finally:
         if file_fd is not None:
@@ -151,7 +224,7 @@ def _validate_config_directory(directory_stat: os.stat_result) -> None:
         not stat.S_ISDIR(directory_stat.st_mode)
         or stat.S_ISLNK(directory_stat.st_mode)
         or directory_stat.st_uid != os.getuid()
-        or directory_stat.st_mode & 0o022
+        or stat.S_IMODE(directory_stat.st_mode) & 0o077
     ):
         raise ConfigurationError("ainv configuration directory is unsafe")
 
@@ -162,7 +235,7 @@ def _validate_config_file(file_stat: os.stat_result) -> None:
         or stat.S_ISLNK(file_stat.st_mode)
         or file_stat.st_nlink != 1
         or file_stat.st_uid != os.getuid()
-        or file_stat.st_mode & 0o022
+        or stat.S_IMODE(file_stat.st_mode) & 0o077
     ):
         raise ConfigurationError("ainv configuration file is unsafe")
 

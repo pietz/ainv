@@ -43,6 +43,38 @@ it has Accessibility privileges. The Python-hosted dialog is also not a stable,
 signed application identity. A hard permission boundary would require a signed
 native broker that owns both approval and delivery.
 
+## Local activity-history privacy
+
+Activity history is enabled by default and records the authorization decision
+for each validated `run` and `set` request before any provider resolves a
+secret. It is explicitly not a security audit: records are append-written, but
+a same-user process can disable, modify, delete, replace, or bypass the history;
+it is neither immutable nor tamper-evident. A record does not claim that
+resolution, delivery, command execution, or recipient behavior completed.
+Readers and writers retry advisory-lock contention within a bounded 7 ms sleep
+budget. Residual write contention warns without preventing an otherwise approved
+delivery; residual read contention fails through the normal generic read error.
+
+Records contain no secret values, resolved environments, child output, or full
+command arguments. A command destination contains only its executable name or
+path and argument count. Records do contain credential references, destination
+variable names, file or executable paths, working directories, outcomes,
+reasons, truncation metadata, and best-effort requester application identity.
+This operational metadata may reveal accounts, tools, projects, and usage
+patterns to another process with local account access. Every field is bounded;
+large binding sets retain the total count, a bounded subset, and explicit
+omission, truncation, and filesystem-text escaping metadata.
+
+The fixed passwd-derived path is
+`~/Library/Application Support/ainv/history.jsonl`; `HOME` is not trusted. The
+private file and directory reject unsafe ownership, symlinks, hard links, and
+permissions. Size-bounded rotation preserves at most one private backup. Reads
+validate every line independently. Malformed and partial lines are skipped with
+only a value-free count exposed, and appends recover a partial tail by starting
+the next record on a fresh line. Filesystem safety failures remain hard errors.
+`ainv config --history off` disables future records. The harmless
+`config --test-popup` operation is excluded.
+
 ## Current macOS Keychain authorization limitation
 
 In the current `uv tool` Python distribution, macOS Keychain authorizes the

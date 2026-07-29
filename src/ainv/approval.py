@@ -35,6 +35,14 @@ class ApprovalBinding:
 
 
 @dataclass(frozen=True, slots=True)
+class RequestingApplication:
+    """Best-effort native requester identity resolved once per authorization."""
+
+    name: str
+    icon: object | None
+
+
+@dataclass(frozen=True, slots=True)
 class ApprovalRequest:
     """Value-free context displayed before credential resolution."""
 
@@ -42,6 +50,7 @@ class ApprovalRequest:
     bindings: tuple[ApprovalBinding, ...]
     destination: str
     working_directory: str
+    requester: RequestingApplication | None = None
 
 
 class ApprovalUnavailableError(Exception):
@@ -53,14 +62,6 @@ class Approver(Protocol):
 
     def approve(self, request: ApprovalRequest) -> bool:
         """Return whether the human selected Allow Once."""
-
-
-@dataclass(frozen=True, slots=True)
-class _RequestingApplication:
-    """Best-effort native identity and icon for the app behind the request."""
-
-    name: str
-    icon: object | None
 
 
 class _ProcBSDShortInfo(ctypes.Structure):
@@ -94,7 +95,7 @@ class MacOSApprover:
         try:
             import AppKit  # type: ignore[import-not-found]
 
-            requester = _requesting_application(AppKit)
+            requester = request.requester
             informative_text = _request_text(
                 request,
                 requester_name=requester.name if requester is not None else None,
@@ -123,14 +124,29 @@ class MacOSApprover:
         return bool(response == AppKit.NSAlertFirstButtonReturn)
 
 
-def test_request() -> ApprovalRequest:
+def test_request(
+    requester: RequestingApplication | None = None,
+) -> ApprovalRequest:
     """Return a harmless request that accesses no credential provider."""
     return ApprovalRequest(
         action=DeliveryAction.TEST,
         bindings=(),
         destination="No credential will be accessed.",
         working_directory=os.getcwd(),
+        requester=requester,
     )
+
+
+def requesting_application() -> RequestingApplication | None:
+    """Resolve bundled requester identity once without trusting environment."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        import AppKit  # type: ignore[import-not-found]
+
+        return _requesting_application(AppKit)
+    except Exception:  # noqa: BLE001 - requester identity is optional metadata
+        return None
 
 
 def _request_text(
@@ -180,7 +196,7 @@ def _requesting_application(
     *,
     start_pid: int | None = None,
     parent_process_id: Callable[[int], int] | None = None,
-) -> _RequestingApplication | None:
+) -> RequestingApplication | None:
     """Return the nearest bundled app found in native process ancestry."""
     current_pid = os.getpid() if start_pid is None else start_pid
     parent_lookup = (
@@ -213,7 +229,7 @@ def _running_application(appkit: Any, process_identifier: int) -> object | None:
 
 def _application_identity(
     application: object | None,
-) -> _RequestingApplication | None:
+) -> RequestingApplication | None:
     if application is None:
         return None
     try:
@@ -236,7 +252,7 @@ def _application_identity(
         icon = application.icon()  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 - icon absence does not hide identity
         icon = None
-    return _RequestingApplication(name=name, icon=icon)
+    return RequestingApplication(name=name, icon=icon)
 
 
 @cache

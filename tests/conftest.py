@@ -7,6 +7,7 @@ import os
 import pytest
 
 from ainv.config import Config
+from ainv.history import HistoryReadResult
 
 
 @pytest.fixture(autouse=True)
@@ -25,6 +26,12 @@ def forbid_real_keychain_access(monkeypatch: pytest.MonkeyPatch) -> None:
         forbidden,
     )
     monkeypatch.setattr("ainv.cli._get_config", lambda: Config())
+    monkeypatch.setattr("ainv.cli._get_requester_application", lambda: None)
+    monkeypatch.setattr("ainv.cli._write_history_record", lambda record: None)
+    monkeypatch.setattr(
+        "ainv.cli._read_history_records",
+        lambda limit: HistoryReadResult(records=()),
+    )
 
     def forbid_approval_popup(*args: object, **kwargs: object) -> None:
         raise AssertionError("native approval popups are forbidden in tests")

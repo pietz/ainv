@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import json
 import os
 import pty
@@ -10,15 +11,32 @@ import sys
 import termios
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 import typer
 from typer.testing import CliRunner
 
-from ainv.approval import ApprovalRequest, DeliveryAction
+from ainv.approval import (
+    ApprovalRequest,
+    ApprovalUnavailableError,
+    DeliveryAction,
+    RequestingApplication,
+)
 from ainv.cli import _prompt_new_secret, app
-from ainv.config import ApprovalMode, Config, ConfigurationError
+from ainv.config import ApprovalMode, Config, ConfigurationError, HistoryMode
+from ainv.history import (
+    MAX_RECORD_BYTES,
+    MAX_STORED_BINDINGS,
+    HistoryBinding,
+    HistoryDecision,
+    HistoryError,
+    HistoryReadResult,
+    HistoryRecord,
+    append_history,
+    read_history,
+)
 from ainv.models import (
     CredentialMetadata,
     ProviderCapability,
@@ -141,6 +159,48 @@ def test_config_command_updates_and_displays_approval(
     assert saved == [Config(approval=ApprovalMode.ALWAYS)]
     assert "Approval: always" in result.stdout
     assert "Config: /tmp/ainv-config" in result.stdout
+
+
+def test_config_reset_is_narrow_explicit_repair_for_malformed_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "ainv" / "config.toml"
+    path.parent.mkdir(mode=0o700)
+    path.write_text('unknown = "preserve-until-explicit-reset"\n')
+    path.chmod(0o600)
+    monkeypatch.setattr("ainv.cli.config_path", lambda: path)
+
+    refused = runner.invoke(app, ["config", "--approval", "always"])
+
+    assert refused.exit_code == 1
+    assert "unsupported settings" in refused.stderr
+    assert "preserve-until-explicit-reset" in path.read_text()
+
+    repaired = runner.invoke(app, ["config", "--reset"])
+
+    assert repaired.exit_code == 0
+    assert path.read_text() == 'approval = "off"\n'
+    assert "Approval: off" in repaired.stdout
+    assert "History: on" in repaired.stdout
+
+    combined = runner.invoke(app, ["config", "--reset", "--history", "off"])
+    assert combined.exit_code == 2
+    assert "cannot be combined" in combined.stderr
+
+
+def test_config_reset_does_not_override_unsafe_file_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text("not valid TOML")
+    path.chmod(0o644)
+    monkeypatch.setattr("ainv.cli.config_path", lambda: path)
+
+    result = runner.invoke(app, ["config", "--reset"])
+
+    assert result.exit_code == 1
+    assert "configuration file is unsafe" in result.stderr
+    assert path.read_text() == "not valid TOML"
 
 
 def test_config_popup_test_never_accesses_a_provider(
@@ -1137,3 +1197,587 @@ def test_invalid_approval_config_fails_delivery_closed(
     assert "synthetic invalid configuration" in result.stderr
     assert CANARY not in result.stdout
     assert CANARY not in result.stderr
+
+
+def test_config_command_updates_history_without_resetting_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = Config(approval=ApprovalMode.ALWAYS)
+    saved: list[Config] = []
+    monkeypatch.setattr(
+        "ainv.cli.load_config", lambda path: saved[-1] if saved else current
+    )
+    monkeypatch.setattr(
+        "ainv.cli.save_config", lambda config, path: saved.append(config)
+    )
+    monkeypatch.setattr("ainv.cli.config_path", lambda: Path("/tmp/ainv-config"))
+
+    result = runner.invoke(app, ["config", "--history", "off"])
+
+    assert result.exit_code == 0
+    assert saved == [Config(approval=ApprovalMode.ALWAYS, history=HistoryMode.OFF)]
+    assert "Approval: always" in result.stdout
+    assert "History: off" in result.stdout
+
+
+def test_run_records_not_requested_without_command_arguments_or_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records: list[HistoryRecord] = []
+    path = tmp_path / "ainv" / "history.jsonl"
+    install_provider(monkeypatch, FakeProvider([metadata()]))
+
+    def persist(event: HistoryRecord) -> None:
+        records.append(event)
+        append_history(event, path)
+
+    monkeypatch.setattr("ainv.cli._write_history_record", persist)
+    monkeypatch.setattr(
+        "ainv.cli._get_requester_application",
+        lambda: RequestingApplication(name="Terminal", icon=object()),
+    )
+    monkeypatch.setattr(
+        "ainv.cli._history_clock",
+        lambda: datetime(2025, 2, 3, 4, 5, tzinfo=UTC),
+    )
+
+    def fake_exec(file: str, args: list[str], env: dict[str, str]) -> None:
+        assert env["TOKEN"] == CANARY
+        raise RuntimeError("exec intercepted")
+
+    monkeypatch.setattr(os, "execvpe", fake_exec)
+
+    with pytest.raises(RuntimeError, match="exec intercepted"):
+        runner.invoke(
+            app,
+            [
+                "run",
+                "keychain:TOKEN@personal",
+                "--",
+                "/usr/bin/example",
+                "--password",
+                CANARY,
+            ],
+            catch_exceptions=False,
+        )
+
+    assert len(records) == 1
+    event = records[0]
+    assert event.timestamp == "2025-02-03T04:05:00Z"
+    assert event.action == "run"
+    assert event.decision is HistoryDecision.NOT_REQUESTED
+    assert event.reason == "approval_disabled"
+    assert event.bindings == (HistoryBinding("keychain:TOKEN@personal", "TOKEN"),)
+    assert event.destination == {
+        "kind": "command",
+        "executable": "/usr/bin/example",
+        "argument_count": 2,
+    }
+    assert event.requester_app == "Terminal"
+    persisted = path.read_text()
+    assert "--password" not in persisted
+    assert CANARY not in persisted
+
+
+def test_extreme_valid_argv_cannot_suppress_bounded_history_or_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class CountingProvider(FakeProvider):
+        calls = 0
+
+        def resolve(self, reference: str, *, no_input: bool = False) -> Secret:
+            self.calls += 1
+            return super().resolve(reference, no_input=no_input)
+
+    provider = CountingProvider([metadata()])
+    install_provider(monkeypatch, provider)
+    path = tmp_path / "ainv" / "history.jsonl"
+    monkeypatch.setattr(
+        "ainv.cli._write_history_record", lambda item: append_history(item, path)
+    )
+    executable = "/" + "e" * 20_000
+    argument = "--opaque=" + CANARY + "x" * 20_000
+    bindings = [
+        f"TOKEN_{index}=keychain:{'r' * 2000}@account-{index}"
+        for index in range(MAX_STORED_BINDINGS + 7)
+    ]
+
+    def fake_exec(file: str, args: list[str], env: dict[str, str]) -> None:
+        assert file == executable
+        assert args[-1] == argument
+        assert all(env[f"TOKEN_{index}"] == CANARY for index in range(len(bindings)))
+        raise RuntimeError("exec intercepted")
+
+    monkeypatch.setattr(os, "execvpe", fake_exec)
+
+    with pytest.raises(RuntimeError, match="exec intercepted"):
+        runner.invoke(
+            app,
+            ["run", *bindings, "--", executable, argument],
+            catch_exceptions=False,
+        )
+
+    result = read_history(path=path)
+    assert provider.calls == len(bindings)
+    assert result.invalid_record_count == 0
+    assert len(result.records) == 1
+    event = result.records[0]
+    assert event.binding_count == len(bindings)
+    assert len(event.bindings) == MAX_STORED_BINDINGS
+    assert event.bindings_omitted == 7
+    assert "destination.executable" in event.truncated_fields
+    assert "bindings[0].reference" in event.truncated_fields
+    assert path.stat().st_size < MAX_RECORD_BYTES
+    persisted = path.read_text()
+    assert argument not in persisted
+    assert CANARY not in persisted
+
+
+def test_surrogate_escaped_argv_is_safely_represented_without_losing_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "ainv" / "history.jsonl"
+    executable = "/tmp/" + os.fsdecode(b"non-utf8-\xff")
+    install_provider(monkeypatch, FakeProvider([metadata()]))
+    monkeypatch.setattr(
+        "ainv.cli._write_history_record", lambda item: append_history(item, path)
+    )
+
+    def fake_exec(file: str, args: list[str], env: dict[str, str]) -> None:
+        assert file == executable
+        assert env["TOKEN"] == CANARY
+        raise RuntimeError("exec intercepted")
+
+    monkeypatch.setattr(os, "execvpe", fake_exec)
+
+    with pytest.raises(RuntimeError, match="exec intercepted"):
+        runner.invoke(
+            app,
+            ["run", "keychain:TOKEN@personal", "--", executable],
+            catch_exceptions=False,
+        )
+
+    result = read_history(path=path)
+    assert len(result.records) == 1
+    event = result.records[0]
+    assert event.escaped_fields == ("destination.executable",)
+    assert "\\udcff" in str(event.destination["executable"])
+    assert CANARY not in path.read_text()
+
+
+def test_contended_history_lock_warns_without_blocking_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "ainv"
+    directory.mkdir(mode=0o700)
+    path = directory / "history.jsonl"
+    lock_fd = os.open(directory, os.O_RDONLY)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    install_provider(monkeypatch, FakeProvider([metadata()]))
+    monkeypatch.setattr(
+        "ainv.cli._write_history_record", lambda item: append_history(item, path)
+    )
+
+    def fake_exec(file: str, args: list[str], env: dict[str, str]) -> None:
+        assert env["TOKEN"] == CANARY
+        raise OSError("intercepted")
+
+    monkeypatch.setattr(os, "execvpe", fake_exec)
+    try:
+        result = runner.invoke(
+            app,
+            ["run", "keychain:TOKEN@personal", "--", "example-command"],
+        )
+    finally:
+        os.close(lock_fd)
+
+    assert result.exit_code == 1
+    assert "Warning: could not record ainv activity history." in result.stderr
+    assert "could not start child command" in result.stderr
+    assert not path.exists()
+
+
+def test_empty_run_executable_is_rejected_before_authorization_or_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MustNotResolve(FakeProvider):
+        def resolve(self, reference: str, *, no_input: bool = False) -> Secret:
+            raise AssertionError("empty executable must fail during parsing")
+
+    install_provider(monkeypatch, MustNotResolve([metadata()]))
+    records: list[HistoryRecord] = []
+    monkeypatch.setattr("ainv.cli._write_history_record", records.append)
+
+    result = runner.invoke(
+        app,
+        ["run", "keychain:TOKEN@personal", "--", ""],
+    )
+
+    assert result.exit_code == 2
+    assert "nonempty child executable" in result.stderr
+    assert records == []
+
+
+def test_run_records_allowed_and_denied_decisions_before_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CountingProvider(FakeProvider):
+        calls = 0
+
+        def resolve(self, reference: str, *, no_input: bool = False) -> Secret:
+            self.calls += 1
+            return super().resolve(reference, no_input=no_input)
+
+    for allowed, expected, expected_calls in (
+        (False, HistoryDecision.DENIED, 0),
+        (True, HistoryDecision.ALLOWED, 1),
+    ):
+        records: list[HistoryRecord] = []
+        provider = CountingProvider([metadata()])
+        approver = FakeApprover(allowed=allowed, requests=[])
+        install_provider(monkeypatch, provider)
+        monkeypatch.setattr(
+            "ainv.cli._get_config",
+            lambda: Config(approval=ApprovalMode.ALWAYS),
+        )
+        monkeypatch.setattr(
+            "ainv.cli._get_approver", lambda approver=approver: approver
+        )
+        monkeypatch.setattr("ainv.cli._write_history_record", records.append)
+        monkeypatch.setattr(
+            os, "execvpe", lambda *args: (_ for _ in ()).throw(OSError())
+        )
+
+        result = runner.invoke(
+            app,
+            ["run", "keychain:TOKEN@personal", "--", "example-command"],
+        )
+
+        assert records[0].decision is expected
+        assert records[0].reason == ("user_denied" if not allowed else "user_allowed")
+        assert provider.calls == expected_calls
+        assert result.exit_code == (5 if not allowed else 1)
+
+
+def test_requester_identity_is_resolved_once_for_dialog_and_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requester = RequestingApplication(name="Single requester", icon=object())
+    requester_calls = 0
+    records: list[HistoryRecord] = []
+    approver = FakeApprover(allowed=False, requests=[])
+    install_provider(monkeypatch, FakeProvider([metadata()]))
+    monkeypatch.setattr(
+        "ainv.cli._get_config", lambda: Config(approval=ApprovalMode.ALWAYS)
+    )
+
+    def get_requester() -> RequestingApplication:
+        nonlocal requester_calls
+        requester_calls += 1
+        return requester
+
+    monkeypatch.setattr("ainv.cli._get_requester_application", get_requester)
+    monkeypatch.setattr("ainv.cli._get_approver", lambda: approver)
+    monkeypatch.setattr("ainv.cli._write_history_record", records.append)
+
+    result = runner.invoke(
+        app,
+        ["run", "keychain:TOKEN@personal", "--", "example-command"],
+    )
+
+    assert result.exit_code == 5
+    assert requester_calls == 1
+    assert approver.requests[0].requester is requester
+    assert records[0].requester_app == requester.name
+    assert records[0].reason == "user_denied"
+
+
+@pytest.mark.parametrize(
+    ("arguments", "reason"),
+    [
+        (["--no-input"], "interactive_input_disabled"),
+        ([], "approval_unavailable"),
+    ],
+)
+def test_authorization_errors_have_distinct_error_outcome(
+    arguments: list[str], reason: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records: list[HistoryRecord] = []
+    install_provider(monkeypatch, FakeProvider([metadata()]))
+    monkeypatch.setattr(
+        "ainv.cli._get_config", lambda: Config(approval=ApprovalMode.ALWAYS)
+    )
+    monkeypatch.setattr("ainv.cli._write_history_record", records.append)
+    if reason == "approval_unavailable":
+        monkeypatch.setattr(
+            "ainv.cli._get_approver",
+            lambda: (_ for _ in ()).throw(
+                ApprovalUnavailableError("native approval is unavailable")
+            ),
+        )
+
+    result = runner.invoke(
+        app,
+        [*arguments, "run", "keychain:TOKEN@personal", "--", "example-command"],
+    )
+
+    assert result.exit_code == 5
+    assert records[0].decision is HistoryDecision.ERROR
+    assert records[0].reason == reason
+
+
+def test_history_disabled_records_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records: list[HistoryRecord] = []
+    install_provider(monkeypatch, FakeProvider([metadata()]))
+    monkeypatch.setattr("ainv.cli._get_config", lambda: Config(history=HistoryMode.OFF))
+    monkeypatch.setattr("ainv.cli._write_history_record", records.append)
+    monkeypatch.setattr(os, "execvpe", lambda *args: (_ for _ in ()).throw(OSError()))
+
+    result = runner.invoke(
+        app,
+        ["run", "keychain:TOKEN@personal", "--", "example-command"],
+    )
+
+    assert result.exit_code == 1
+    assert records == []
+
+
+def test_set_records_only_after_destination_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    destination = tmp_path / ".env"
+    records: list[HistoryRecord] = []
+    install_provider(monkeypatch, FakeProvider([metadata()]))
+    monkeypatch.setattr("ainv.cli._write_history_record", records.append)
+
+    refused = runner.invoke(
+        app,
+        ["set", "keychain:TOKEN@personal", "--file", str(destination)],
+    )
+
+    assert refused.exit_code == 6
+    assert records == []
+
+    (tmp_path / ".gitignore").write_text(".env\n")
+    allowed = runner.invoke(
+        app,
+        ["set", "keychain:TOKEN@personal", "--file", str(destination)],
+    )
+
+    assert allowed.exit_code == 0
+    assert len(records) == 1
+    assert records[0].action == "set"
+    assert records[0].destination == {
+        "kind": "dotenv_file",
+        "path": str(destination.absolute()),
+    }
+    assert CANARY not in json.dumps(records[0].to_dict())
+
+
+def test_history_write_failure_warns_without_blocking_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CountingProvider(FakeProvider):
+        calls = 0
+
+        def resolve(self, reference: str, *, no_input: bool = False) -> Secret:
+            self.calls += 1
+            return super().resolve(reference, no_input=no_input)
+
+    provider = CountingProvider([metadata()])
+    install_provider(monkeypatch, provider)
+
+    def fail_write(record: HistoryRecord) -> None:
+        raise OSError("private/native/path/detail")
+
+    monkeypatch.setattr("ainv.cli._write_history_record", fail_write)
+    monkeypatch.setattr(os, "execvpe", lambda *args: (_ for _ in ()).throw(OSError()))
+
+    result = runner.invoke(
+        app,
+        ["run", "keychain:TOKEN@personal", "--", "example-command"],
+    )
+
+    assert result.exit_code == 1
+    assert provider.calls == 1
+    assert "Warning: could not record ainv activity history." in result.stderr
+    assert "private/native/path/detail" not in result.stderr
+    assert CANARY not in result.stderr
+
+
+def sample_history_record(
+    *,
+    decision: HistoryDecision = HistoryDecision.ALLOWED,
+    reason: str = "user_allowed",
+) -> HistoryRecord:
+    return HistoryRecord(
+        timestamp="2025-02-03T04:05:00Z",
+        action="run",
+        decision=decision,
+        reason=reason,
+        binding_count=1,
+        bindings=(HistoryBinding("keychain:TOKEN@personal", "TOKEN"),),
+        bindings_omitted=0,
+        destination={
+            "kind": "command",
+            "executable": "example-command",
+            "argument_count": 2,
+        },
+        working_directory="/safe/project",
+        requester_app="Terminal",
+    )
+
+
+def test_history_json_is_versioned_and_structured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_limits: list[int] = []
+
+    def read_records(limit: int) -> HistoryReadResult:
+        seen_limits.append(limit)
+        return HistoryReadResult(records=(sample_history_record(),))
+
+    monkeypatch.setattr("ainv.cli._read_history_records", read_records)
+
+    result = runner.invoke(app, ["history", "--limit", "7", "--json"])
+
+    assert result.exit_code == 0
+    assert seen_limits == [7]
+    document = json.loads(result.stdout)
+    assert document["schema_version"] == 2
+    assert document["history"][0]["record_version"] == 1
+    assert document["history"][0]["destination"] == {
+        "kind": "command",
+        "executable": "example-command",
+        "argument_count": 2,
+    }
+
+
+@pytest.mark.parametrize(
+    ("decision", "reason", "label"),
+    [
+        (HistoryDecision.DENIED, "user_denied", "human denied"),
+        (HistoryDecision.ERROR, "approval_unavailable", "approval unavailable"),
+    ],
+)
+def test_history_human_output_pins_outcome_reason_labels(
+    decision: HistoryDecision,
+    reason: str,
+    label: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "ainv.cli._read_history_records",
+        lambda limit: HistoryReadResult(
+            records=(sample_history_record(decision=decision, reason=reason),)
+        ),
+    )
+
+    result = runner.invoke(app, ["history"])
+
+    assert result.exit_code == 0
+    assert decision.value in result.stdout
+    assert f"Reason: {label}" in result.stdout
+
+
+def test_history_read_skips_warning_is_value_free_and_json_is_structured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result_with_corruption = HistoryReadResult(
+        records=(sample_history_record(),), invalid_record_count=2
+    )
+    monkeypatch.setattr(
+        "ainv.cli._read_history_records", lambda limit: result_with_corruption
+    )
+
+    human = runner.invoke(app, ["history"])
+    structured = runner.invoke(app, ["history", "--json"])
+
+    assert human.exit_code == 0
+    assert "skipped 2 malformed activity history records" in human.stderr
+    assert CANARY not in human.stderr
+    document = json.loads(structured.stdout)
+    assert document["invalid_record_count"] == 2
+    assert structured.stderr == ""
+
+
+def test_history_cli_does_not_render_corrupt_line_contents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "history.jsonl"
+    path.write_bytes(b"ATTACKER-CONTROLLED-LINE\n")
+    path.chmod(0o600)
+    monkeypatch.setattr(
+        "ainv.cli._read_history_records", lambda limit: read_history(path=path)
+    )
+
+    result = runner.invoke(app, ["history"])
+
+    assert result.exit_code == 0
+    assert "skipped 1 malformed activity history record" in result.stderr
+    assert "ATTACKER-CONTROLLED-LINE" not in result.stdout
+    assert "ATTACKER-CONTROLLED-LINE" not in result.stderr
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_history_read_errors_use_cli_error_contract(
+    as_json: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_read(limit: int) -> HistoryReadResult:
+        raise HistoryError("could not read ainv activity history")
+
+    monkeypatch.setattr("ainv.cli._read_history_records", fail_read)
+
+    result = runner.invoke(app, ["history", *(["--json"] if as_json else [])])
+
+    assert result.exit_code == 1
+    if as_json:
+        assert json.loads(result.stdout)["error"] == {
+            "code": 1,
+            "message": "could not read ainv activity history",
+        }
+        assert result.stderr == ""
+    else:
+        assert "Error: could not read ainv activity history" in result.stderr
+
+
+def test_history_human_output_is_compact_and_understandable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "ainv.cli._read_history_records",
+        lambda limit: HistoryReadResult(records=(sample_history_record(),)),
+    )
+
+    result = runner.invoke(app, ["history"])
+
+    assert result.exit_code == 0
+    assert "Timestamp" in result.stdout
+    assert "allowed" in result.stdout
+    assert "example-command" in result.stdout
+    assert "(+2" in result.stdout
+    assert "args)" in result.stdout
+    assert "TOKEN" in result.stdout
+    assert "Terminal" in result.stdout
+
+
+def test_config_popup_test_is_never_added_to_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    approver = FakeApprover(allowed=True, requests=[])
+    monkeypatch.setattr("ainv.cli.load_config", lambda path: Config())
+    monkeypatch.setattr("ainv.cli.config_path", lambda: Path("/tmp/ainv-config"))
+    monkeypatch.setattr("ainv.cli._get_approver", lambda: approver)
+    monkeypatch.setattr(
+        "ainv.cli._write_history_record",
+        lambda record: (_ for _ in ()).throw(AssertionError("must not write")),
+    )
+
+    result = runner.invoke(app, ["config", "--test-popup"])
+
+    assert result.exit_code == 0
