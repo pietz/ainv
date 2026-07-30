@@ -1,6 +1,6 @@
 [project]
 name = "ainv"
-version = "0.3.0"
+version = "0.4.0"
 description = "Agent-operated credential handoff from existing providers"
 readme = "README.md"
 authors = [

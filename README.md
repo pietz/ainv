@@ -24,7 +24,7 @@ default legacy macOS Keychain only.
 ## Installation
 
 > [!WARNING]
-> Version 0.3.0 remains pre-alpha. In the current `uv tool` distribution,
+> Version 0.4.0 remains pre-alpha. In the current `uv tool` distribution,
 > Keychain authorizes the uv-managed Python interpreter rather than a stable,
 > signed `ainv` executable. Read [SECURITY.md](SECURITY.md) before approving
 > Keychain access.

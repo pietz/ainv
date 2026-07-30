@@ -1,6 +1,6 @@
 # ainv specification
 
-Status: Draft 0.3.0 pre-alpha
+Status: Draft 0.4.0 pre-alpha
 
 Target: Narrow public dogfood release with a hard validation threshold
 
@@ -529,7 +529,7 @@ Every provider declares explicit capabilities. The common operations are:
 4. Optional `create`: Store one new credential through secure human input.
 
 The internal registry maps provider names and credential prefixes to trusted
-factories. Version 0.3.0 ships only the Keychain provider and loads no third-party
+factories. Version 0.4.0 ships only the Keychain provider and loads no third-party
 code. `ainv` owns no credential storage and does not update, delete, rotate, or
 synchronize credentials.
 
@@ -561,7 +561,7 @@ disables it and fails closed.
 
 ##### Current distribution authorization limitation
 
-Version 0.3.0 remains a pre-alpha evaluation release. In the current `uv tool`
+Version 0.4.0 remains a pre-alpha evaluation release. In the current `uv tool`
 Python distribution, Keychain authorizes the uv-managed Python
 interpreter executable, not the `ainv` console script or terminal. An
 `ainv`-created generic-password item receives the interpreter's default creator

@@ -98,7 +98,7 @@ identify `python3.13` rather than `ainv`; exact dialog wording has not been
 observed. `ainv find` is metadata-only and cannot prompt, while secret
 resolution for `ainv set` or `ainv run` can prompt.
 
-Version 0.3.0 remains a pre-alpha evaluation release. Do not use the current
+Version 0.4.0 remains a pre-alpha evaluation release. Do not use the current
 Python distribution as a stable, least-privilege Keychain identity for
 unattended high-value credentials. A stable Developer ID-signed native identity
 is required before a stable release.
